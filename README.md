@@ -1,5 +1,5 @@
 Install as a package: 
-`pip install -e [full path to personal-utils folder]`
+`pip install -e [full path to downloaded personal-utils folder]`
 
 Import:
 `import overengineering`

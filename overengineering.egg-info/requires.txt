@@ -1,0 +1,8 @@
+numpy
+sympy
+qutip
+ipython
+
+[dev]
+jupyter
+matplotlib

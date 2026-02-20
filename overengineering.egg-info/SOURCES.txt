@@ -1,6 +1,7 @@
+README.md
 pyproject.toml
 overengineering/__init__.py
-overengineering/gen_utils.py
+overengineering/general.py
 overengineering/nmr_sims.py
 overengineering/optics.py
 overengineering/optics_old.py

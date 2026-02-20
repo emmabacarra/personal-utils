@@ -1,4 +1,4 @@
-from .general import *
+from ..general import *
 
 import numpy as np
 from scipy.signal import sawtooth

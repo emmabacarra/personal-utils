@@ -1,12 +1,11 @@
 from .helpers import *
+from ..constants import *
 
 import numpy as np
 from typing import Optional
 from abc import ABC, abstractmethod
 from qutip import Qobj
 
-h  = 6.62607015e-34   # J·s
-c = 299792458  # Speed of light (m/s)
 
 
 class OpticalComponent(ABC):

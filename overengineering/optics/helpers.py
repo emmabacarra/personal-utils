@@ -1,13 +1,11 @@
 from ..general import *
+from ..constants import *
 from .helpers import *
 
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Optional, List, Tuple
 from dataclasses import dataclass
-
-h  = 6.62607015e-34   # J·s
-c = 299792458  # Speed of light (m/s)
 
 
 @dataclass
@@ -122,7 +120,7 @@ def plot_beam_propagation(positions: np.ndarray, widths: np.ndarray,
     return fig, ax
 
 
-def plotcavity_stability_map(R: float, reflectivity: float,
+def plot_cavity_stability_map(R: float, reflectivity: float,
                               W_range: Tuple[float, float],
                               H_range: Tuple[float, float],
                               W_design: float, H_design: float,

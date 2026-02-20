@@ -1,4 +1,5 @@
 from ..general import *
+from ..constants import *
 from .helpers import *
 from .components import *
 
@@ -8,10 +9,6 @@ from scipy.signal import sawtooth
 import matplotlib.pyplot as plt
 from typing import Optional, List, Tuple, Dict
 from qutip import Qobj, basis
-
-
-h  = 6.62607015e-34   # J·s
-c = 299792458  # Speed of light (m/s)
 
 
 
@@ -1415,7 +1412,7 @@ class ModeMatchOptimizer:
         
         return results
     
-    def print_results(self, results: Dict):
+    def print_summary(self, results: Dict):
         niceprint('---')
         niceprint(f"**Telescope Optimization**", 3)
         
@@ -1899,8 +1896,8 @@ class SPDCSimulator:
 
         niceprint('**SPDC Results**', 3)
         
-        niceprint(f"<u> SPDC Source Parameters </u> <br>" +
-                  f"Pump wavelength: {self.p.lambda_pump*1e9:.0f} nm <br>" +
+        niceprint(f"<u> SPDC Source Parameters </u>", 5)
+        niceprint(f"Pump wavelength: {self.p.lambda_pump*1e9:.0f} nm <br>" +
                   f"SPDC efficiency: {self.p.spdc_efficiency:.0e} <br>" +
                   f"Detection efficiencies: $\\eta_1 = {self.p.eta_1:.2f}, \\eta_2 = {self.p.eta_2:.2f}$ <br>" +
                   f"Operating current: {self.p.I_operating:.1f} mA <br>"
@@ -1914,8 +1911,8 @@ class SPDCSimulator:
         P_spdc   = self.spdc_W(self.p.P_max)
         Rc    = self.Rcoin_W(np.array([self.p.P_max]))[0]
         
-        niceprint(f"<u> SPDC Calculations </u> <br>" +
-                  f"Power: <br>" +
+        niceprint(f"<u> SPDC Calculations </u>", 5)
+        niceprint(f"Power: <br>" +
                     f"$\\quad P_{{pump}}$ = {self.p.P_max*1e3:.1f} mW <br>" +
                     f"$\\quad P_{{SPDC}}$ = {P_spdc*1e3:.1f} mW <br>" +
                   f"Energies: <br>" +

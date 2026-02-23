@@ -1255,10 +1255,12 @@ class BellInequalityAnalyzer:
             f"**CHSH Result (simulation) — $|\\psi_{{{label}}}\\rangle$,"
             f"  $V = {self.visibility:.2f}$**", 4
         )
+        
+        label = "**Yes** <span style=\"color:green\">&#x2713;</span>" if result["violates"] else "**No** <span style=\"color:red\">&#x2717;</span>"
         niceprint(
             f"$\\langle S \\rangle = {result['S']:.4f} \\pm {result['sigma_S']:.4f}$  "
             f"QM prediction: $2\\sqrt{{2}}\\cdot V = {result['S_theory']:.4f}$  "
-            f"Violates Bell: {'**Yes** <span style="color:green">&#x2713;</span>' if result['violates'] else '**No** <span style="color:red">&#x2717;</span>'}"
+            f"Violates Bell: {label}"
         )
 
     def plot_correlation_sweep(

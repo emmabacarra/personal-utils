@@ -1,6 +1,3 @@
-from .helpers import *
-from ..constants import *
-
 import numpy as np
 from typing import Optional
 from abc import ABC, abstractmethod
@@ -35,7 +32,7 @@ class OpticalComponent(ABC):
         return state
     
     def __repr__(self):
-        return f"{self._class__.__name__}(name='{self.name}')"
+        return f"{self.__class__.__name__}(name='{self.name}')"
 
 class FreeSpace(OpticalComponent):
     """
@@ -441,4 +438,8 @@ class PolarizingBeamSplitter(PolarizationComponent):
     
     def __repr__(self):
         return f"PBS(port='{self.port}')"
+
+
+
+
 

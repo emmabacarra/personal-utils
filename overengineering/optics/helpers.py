@@ -1,77 +1,125 @@
 from ..general import *
-from ..constants import *
-from .helpers import *
+from scipy.constants import h, c
+from .params import LaserBeam, Telescope
 
 import numpy as np
+from qutip import *
 import matplotlib.pyplot as plt
-from typing import Optional, List, Tuple
-from dataclasses import dataclass
+from typing import Optional, List, Tuple, Dict
+from tqdm import tqdm
 
 
-@dataclass
-class CavityGeometry:
-    """Bow-tie cavity geometry parameters (all in cm for compatibility)"""
-    W: float  # Width of bow-tie cavity in cm
-    H: float  # Height of bow-tie cavity in cm
-    fconcave: float  # Focal length of concave mirror in cm
-    R_mirrors: List[float]  # Reflectivities [R_input, R_output, R_flat1, R_flat2]
-    wavelength: float  # Wavelength in cm
+# paulis
+_I2  = np.eye(2, dtype=complex)
+_sX  = np.array([[ 0,  1 ], [ 1,  0 ]], dtype=complex)   # σ₁ → D/A basis
+_sY  = np.array([[ 0, -1j], [ 1j, 0 ]], dtype=complex)   # σ₂ → R/L basis
+_sZ  = np.array([[ 1,  0 ], [ 0, -1 ]], dtype=complex)   # σ₃ → H/V basis
+_PAULI = [_I2, _sX, _sY, _sZ]
+
+# projection kets
+_KET = {
+    'H': np.array([ 1,  0 ], dtype=complex),
+    'V': np.array([ 0,  1 ], dtype=complex),
+    'D': np.array([ 1,  1 ], dtype=complex) / np.sqrt(2),
+    'A': np.array([ 1, -1 ], dtype=complex) / np.sqrt(2),
+    'R': np.array([ 1,  1j ], dtype=complex) / np.sqrt(2),
+    'L': np.array([ 1, -1j ], dtype=complex) / np.sqrt(2),
+}
+_LABELS_1Q = ['H', 'V', 'D', 'A', 'R', 'L']
+
+# quED-TOM waveplate settings:
+_SETTINGS = {
+    'H': ( 0, 0 ),
+    'V': ( 0, np.pi/4 ),
+    'D': ( 0, np.pi/8 ),
+    'A': ( 0, -np.pi/8 ),
+    'R': ( np.pi/4, 0 ),
+    'L': ( -np.pi/4, 0 ),
+}
 
 
-@dataclass
-class LaserBeam:
-    """Laser beam parameters (in cm for compatibility)"""
-    w0: float  # Beam waist in cm
-    z0_location: float  # Distance from reference point to waist in cm
-    wavelength: float  # Wavelength in cm
+def _stokes_contrast(n_plus, n_minus) -> float:
+    """(N₊ − N₋) / (N₊ + N₋).  Returns 0 if both are zero."""
+    total = n_plus + n_minus
+    return float((n_plus - n_minus) / total) if total > 0 else 0.0
 
-
-@dataclass
-class Telescope:
-    """Telescope lens parameters (in cm)"""
-    f1: float  # Focal length of first lens in cm
-    f2: float  # Focal length of second lens in cm
-
-
-@dataclass
-class PiezoActuator:
-    """Piezo actuator parameters"""
-    displacement_per_volt: float  # nm/V
-    voltage_amplitude: float  # V (peak amplitude)
-    frequency: float  # Hz
-    offset_voltage: float  # V (DC offset)
-
-
-@dataclass
-class Photodetector:
-    """Photodetector parameters"""
-    responsivity: float  # A/W
-    load_resistance: float  # Ohms
-    gain: float  # Additional amplifier gain
-
-@dataclass
-class SPDC:
+def _analysis_circuit(qwp_angle: float, hwp_angle: float,
+                      wavelength: float = 810e-9):
     """
-    SPDC parameters for the quED entanglement demonstrator
+    Build the QWP → HWP → PBS analysis circuit for one measurement setting.
 
-    Parameters
-    ----------
-    lambda_pump    : pump wavelength [m], default 405 nm (Blu-Ray diode)
-    spdc_efficiency: probability per pump photon of producing one pair, default 1e-11
-    eta_1, eta_2   : end-to-end detection efficiencies for arm 1 and arm 2
-    P_max          : pump power at operating current [W], default 18 mW
-    I_threshold    : laser diode threshold current [mA], default 26 mA
-    I_operating    : laser diode operating current [mA], default 41 mA (quED-3)
+    Uses the existing OpticalCircuit, QuarterWavePlate, HalfWavePlate, and
+    PolarizingBeamSplitter classes directly.
+
+    Source: quED-TOM manual §2.1.2 (waveplate + PBS measurement scheme).
     """
-    lambda_pump:     float = 405e-9
-    spdc_efficiency: float = 1e-11
-    eta_1:           float = 0.20
-    eta_2:           float = 0.20
-    P_max:           float = 18e-3
-    I_threshold:     float = 26.0
-    I_operating:     float = 41.0
+    from .simulators import OpticalCircuit
+    circ = OpticalCircuit(wavelength=wavelength, name="Analysis Circuit")
+    circ.add_qwp(fast_axis_angle=qwp_angle)
+    circ.add_hwp(fast_axis_angle=hwp_angle)
+    circ.add_pbs(port='transmitted')
+    return circ
 
+def density_matrix_1photon(counts) -> Qobj:
+    
+    N = np.asarray(counts, dtype=float)
+    N_H, N_V, N_D, N_A, N_R, N_L = N
 
+    SZ = _stokes_contrast(N_H, N_V)
+    SX = _stokes_contrast(N_D, N_A)
+    SY = _stokes_contrast(N_R, N_L)
+
+    rho = 0.5 * (_I2 + SX * _sX + SY * _sY + SZ * _sZ)
+    return Qobj(rho)
+
+def density_matrix_2photon(counts_36) -> Qobj:
+    
+    C = np.asarray(counts_36, dtype=float)
+    assert C.shape == (6, 6), "counts_36 must be shape (6, 6)"
+
+    # basis ordering 0=HV, 1=DA, 2=RL maps to Pauli indices 3, 1, 2
+    _B2P  = [3, 1, 2]
+    _SIGN = np.array([[1, -1], [-1, 1]])
+
+    S = np.zeros((4, 4), dtype=float)
+    S[0, 0] = 1.0
+
+    for bi in range(3):
+        pi = _B2P[bi]
+        for bj in range(3):
+            pj = _B2P[bj]
+            block = C[2*bi:2*bi+2, 2*bj:2*bj+2]
+            total = block.sum()
+            S[pi, pj] = (_SIGN * block).sum() / total if total > 0 else 0.0
+
+        row = C[2*bi:2*bi+2, :].sum(axis=1)
+        S[pi, 0] = _stokes_contrast(row[0], row[1])
+
+    for bj in range(3):
+        pj = _B2P[bj]
+        col = C[:, 2*bj:2*bj+2].sum(axis=0)
+        S[0, pj] = _stokes_contrast(col[0], col[1])
+
+    rho = sum(S[i, j] * np.kron(_PAULI[i], _PAULI[j])
+              for i in range(4) for j in range(4)) / 4.0
+    return Qobj(rho)
+
+def rho_properties(rho) -> dict:
+    
+    arr = rho.full() if isinstance(rho, Qobj) else np.asarray(rho)
+    return {
+        'trace':  float(np.trace(arr).real),
+        'purity': float(np.trace(arr @ arr).real),
+    }
+
+def rho_eigensystem(rho) -> Tuple[np.ndarray, List[Qobj]]:
+    
+    arr = rho.full() if isinstance(rho, Qobj) else np.asarray(rho)
+    vals, vecs = np.linalg.eigh(arr)
+    order = np.argsort(vals)[::-1]
+    vals  = vals[order].real
+    vecs  = vecs[:, order]
+    return vals, [Qobj(vecs[:, k].reshape(-1, 1)) for k in range(len(vals))]
 
 def compose_abcd(*matrices: np.ndarray) -> np.ndarray:
     """
@@ -88,6 +136,221 @@ def compose_abcd(*matrices: np.ndarray) -> np.ndarray:
         result = M @ result
     return result
 
+def _fiber_jones(theta: float, delta: float) -> np.ndarray:
+    """
+    Jones matrix for a birefringent fiber with fast axis at angle theta and retardance delta.
+    """
+    c, s = np.cos(theta), np.sin(theta)
+    R     = np.array([[c, -s], [s, c]])
+    W     = np.array([[1, 0], [0, np.exp(-1j * delta)]])
+    return R @ W @ R.T
+
+def sweep_focal_lengths(
+    laser:          LaserBeam,
+    f_collimator:   float,
+    w_fiber:        float,
+    d_laser_m1:     float,
+    d_m1L1_nom:     float = 0.127,
+    d_12_nom:       float = 0.070,
+    d_L2coll_nom:   float = 0.354,
+    d_m1L1_tol:     float = 0.05,
+    d_12_bounds:    Tuple[float, float] = (0.05, 0.07),
+    d_L2coll_tol:   float = 0.10,
+    top_n:          int   = 10,
+) -> List[Dict]:
+    """
+    Sweep all combinations of (f1, f2) from the available lens set and run
+    FiberModeMatchOptimizer for each, returning the top_n results by coupling
+    efficiency.
+
+    Available focal lengths
+    -----------------------
+    Short lenses [m]: 0.050, 0.075, 0.100, 0.150, 0.200, 0.300
+    (These correspond to the lab set in both mm and cm sizes.)
+
+    Parameters
+    ----------
+    laser         : LaserBeam with w0 and wavelength set
+    f_collimator  : collimator focal length [m]
+    w_fiber       : fiber mode-field radius [m]
+    d_laser_m1    : fixed laser-to-mirror1 distance [m]
+    d_m1L1_nom    : nominal mirror1-to-L1 distance [m]
+    d_12_nom      : nominal L1-to-L2 distance [m]
+    d_L2coll_nom  : nominal L2-to-collimator distance [m]
+    d_m1L1_tol    : ± search tolerance for d_m1L1 [m]
+    d_12_bounds   : hard (lo, hi) bounds for d_12 [m]
+    d_L2coll_tol  : ± search tolerance for d_L2coll [m]
+    top_n         : number of top results to return and print
+
+    Returns
+    -------
+    List of result dicts sorted by coupling_eff descending, each containing
+    all keys from FiberModeMatchOptimizer.optimize() plus f1, f2.
+    """
+    available_f = [0.050, 0.075, 0.100, 0.150, 0.200, 0.300]  # meters
+
+    all_results = []
+    total = len(available_f) ** 2
+    niceprint(f"Sweeping {total} focal-length combinations …", 5)
+
+    for f1 in available_f:
+        for f2 in available_f:
+            tel = Telescope(f1=f1, f2=f2)
+            from .analyzers import FiberModeMatchOptimizer
+            opt = FiberModeMatchOptimizer(
+                laser         = laser,
+                telescope     = tel,
+                f_collimator  = f_collimator,
+                w_fiber       = w_fiber,
+                d_laser_m1    = d_laser_m1,
+                d_m1L1_nom    = d_m1L1_nom,
+                d_12_nom      = d_12_nom,
+                d_L2coll_nom  = d_L2coll_nom,
+                d_m1L1_tol    = d_m1L1_tol,
+                d_12_bounds   = d_12_bounds,
+                d_L2coll_tol  = d_L2coll_tol,
+            )
+            r = opt.optimize()
+            all_results.append(r)
+
+    all_results.sort(key=lambda x: x["coupling_eff"], reverse=True)
+    top = all_results[:top_n]
+
+    niceprint("---")
+    niceprint(f"**Focal Length Sweep — Top {top_n} Configurations**", 3)
+    niceprint(
+        f"{'Rank':<5} {'f1 (mm)':<10} {'f2 (mm)':<10} {'η (%)':<10} "
+        f"{'M1→L1 (cm)':<13} {'L1→L2 (cm)':<13} {'L2→coll (cm)':<15} "
+        f"{'w_fiber (μm)':<14} {'Δw (%)'}", 5
+    )
+    for i, r in enumerate(top, 1):
+        dw = abs(r['w_at_fiber'] - r['w_fiber_target']) / r['w_fiber_target'] * 100
+        niceprint(
+            f"{i:<5} {r['f1']*1e3:<10.0f} {r['f2']*1e3:<10.0f} "
+            f"{r['coupling_eff']*100:<10.2f} "
+            f"{r['d_m1L1']*1e2:<13.2f} {r['d_12']*1e2:<13.2f} "
+            f"{r['d_L2coll']*1e2:<15.2f} "
+            f"{r['w_at_fiber']*1e6:<14.3f} {dw:.2f}%"
+        )
+
+    return top
+
+def sweep_telescope_focal_lengths(
+    laser:              LaserBeam,
+    f_collimator:       float,
+    w_fiber:            float,
+    d_laser_m1:    float,
+    d_m1L1_nom:   float,
+    d_12_nom:           float,
+    d_L2coll_nom:       float,
+    d_m1L1_tol:   float = 0.05,
+    d_12_bounds:        Tuple[float, float] = (0.05, 0.07),
+    d_L2coll_tol:       float = 0.10,
+    top_n:              int = 10,
+) -> List[Dict]:
+    """
+    Sweep over all (f1, f2) pairs from the standard available focal lengths
+    and find which telescope configuration gives the best fiber coupling.
+
+    For each pair the full 3-variable optimizer is run over
+    (d_mirror1_L1, d_12, d_L2coll) within their respective bounds.
+    Results are ranked by coupling efficiency.
+
+    Available focal lengths
+    -----------------------
+    50, 75, 100, 150, 200, 300 mm  (standard lab stock)
+
+    Parameters
+    ----------
+    laser             : LaserBeam dataclass
+    f_collimator      : collimator focal length [m]
+    w_fiber           : target fiber mode-field radius (MFD/2) [m]
+    d_laser_m1   : fixed laser-to-mirror1 distance [m]
+    d_m1L1_nom  : nominal mirror1-to-L1 distance [m]
+    d_12_nom          : nominal L1-to-L2 distance [m]
+    d_L2coll_nom      : nominal L2-to-collimator distance [m]
+    d_m1L1_tol  : ± search range around d_m1L1_nom [m]
+    d_12_bounds       : hard (min, max) bounds on d_12 [m]
+    d_L2coll_tol      : ± search range around d_L2coll_nom [m]
+    top_n             : number of top results to print
+
+    Returns
+    -------
+    List of result dicts sorted by coupling_eff descending, each containing
+    all keys from FiberModeMatchOptimizer.optimize() plus f1_mm and f2_mm.
+    """
+    from .analyzers import FiberModeMatchOptimizer
+    FOCAL_LENGTHS_M = [f * 1e-3 for f in [50, 75, 100, 150, 200, 300]]
+
+    all_results = []
+    n_total = len(FOCAL_LENGTHS_M) ** 2
+
+    print(f"Sweeping {n_total} focal-length combinations...")
+    i=0
+    for f1 in tqdm(FOCAL_LENGTHS_M, leave=False):
+        for f2 in FOCAL_LENGTHS_M:
+            tel = Telescope(f1=f1, f2=f2)
+            opt = FiberModeMatchOptimizer(
+                laser             = laser,
+                telescope         = tel,
+                f_collimator      = f_collimator,
+                w_fiber           = w_fiber,
+                d_laser_m1   = d_laser_m1,
+                d_m1L1_nom  = d_m1L1_nom,
+                d_12_nom          = d_12_nom,
+                d_L2coll_nom      = d_L2coll_nom,
+                d_m1L1_tol  = d_m1L1_tol,
+                d_12_bounds       = d_12_bounds,
+                d_L2coll_tol      = d_L2coll_tol,
+            )
+            r = opt.optimize()
+            all_results.append({
+                'f1_mm': f1 * 1e3,
+                'f2_mm': f2 * 1e3,
+                **r,
+            })
+
+    all_results.sort(key=lambda x: x['coupling_eff'], reverse=True)
+
+    # ── Print ranked table ────────────────────────────────────────────────
+    header = (
+        f"{'Rank':<5} {'f1 (mm)':<10} {'f2 (mm)':<10} {'η (%)':<9}"
+        f" {'w_fiber (μm)':<14} {'m1→L1 (cm)':<13}"
+        f" {'d12 (cm)':<11} {'L2→coll (cm)':<14} {'mismatch':<10}"
+    )
+    print("\n" + "=" * len(header))
+    print(f"  Top {top_n} telescope configurations by coupling efficiency")
+    print("=" * len(header))
+    print(header)
+    print("-" * len(header))
+
+    for rank, r in enumerate(all_results[:top_n], 1):
+        print(
+            f"{rank:<5} {r['f1_mm']:<10.0f} {r['f2_mm']:<10.0f}"
+            f" {r['coupling_eff']*100:<9.2f}"
+            f" {r['w_at_fiber']*1e6:<14.3f}"
+            f" {r['d_m1L1']*1e2:<13.2f}"
+            f" {r['d_12']*1e2:<11.2f}"
+            f" {r['d_L2coll']*1e2:<14.2f}"
+            f" {r['mismatch']:<10.5f}"
+        )
+
+    print("=" * len(header))
+    print(f"\nBest: f1 = {all_results[0]['f1_mm']:.0f} mm, f2 = {all_results[0]['f2_mm']:.0f} mm"
+          f"  →  η = {all_results[0]['coupling_eff']*100:.2f}%\n")
+
+    return all_results
+
+def _pbs_transmitted_power(jones_state: np.ndarray) -> float:
+    """
+    Power transmitted through a horizontal PBS port.
+    """
+    E_H = jones_state[0]
+    E_V = jones_state[1]
+    P_tot = np.abs(E_H)**2 + np.abs(E_V)**2
+    if P_tot < 1e-30:
+        return 0.0
+    return float(np.abs(E_H)**2 / P_tot)
 
 def plot_beam_propagation(positions: np.ndarray, widths: np.ndarray,
                           title: str = "Beam Propagation",
@@ -119,7 +382,6 @@ def plot_beam_propagation(positions: np.ndarray, widths: np.ndarray,
     
     return fig, ax
 
-
 def plot_cavity_stability_map(R: float, reflectivity: float,
                               W_range: Tuple[float, float],
                               H_range: Tuple[float, float],
@@ -138,7 +400,7 @@ def plot_cavity_stability_map(R: float, reflectivity: float,
         wavelength: Wavelength (m)
         num_points: Grid resolution
     """
-    from .tools import CavityAnalyzer
+    from .analyzers import CavityAnalyzer
     analyzer = CavityAnalyzer(wavelength)
     
     W_arr = np.linspace(W_range[0], W_range[1], num_points)
@@ -222,10 +484,7 @@ def plot_cavity_stability_map(R: float, reflectivity: float,
     ax2.legend(fontsize=10)
     ax2.grid(True, alpha=0.3)
     
-    plt.tight_layout()
-    plt.show()
-    
-    return fig, (ax1, ax2)
+    return ax1, ax2
 
 @staticmethod
 def photon_energy(wavelength: float) -> float:

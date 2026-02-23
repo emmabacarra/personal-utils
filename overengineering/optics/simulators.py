@@ -1,14 +1,14 @@
 from ..general import *
-from ..constants import *
-from .helpers import *
+from .params import *
 from .components import *
 
 import numpy as np
-from scipy.optimize import minimize, differential_evolution
 from scipy.signal import sawtooth
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from typing import Optional, List, Tuple, Dict
 from qutip import Qobj, basis
+from scipy.ndimage import gaussian_filter
 
 
 
@@ -299,7 +299,7 @@ class OpticalCircuit:
     # Component Addition Methods
     # -------------------------------------------------------------------------
     
-    def addcomponent(self, component: OpticalComponent):
+    def add_component(self, component: OpticalComponent):
         """Add a custom component to the circuit."""
         self.components.append(component)
         return self
@@ -314,7 +314,7 @@ class OpticalCircuit:
         self.components.append(ThinLens(focal_length))
         return self
     
-    def addcurved_mirror(self, radius: float):
+    def add_curved_mirror(self, radius: float):
         """Add a curved mirror (radius of curvature in meters)."""
         self.components.append(CurvedMirror(radius))
         return self
@@ -340,7 +340,7 @@ class OpticalCircuit:
         self.components.append(Polarizer(angle))
         return self
     
-    def addhwp(self, fast_axis_angle: float = 0.0, retardance_deviation: float = 0.0):
+    def add_hwp(self, fast_axis_angle: float = 0.0, retardance_deviation: float = 0.0):
         """Add a half-wave plate (fast axis angle in radians)."""
         self.components.append(HalfWavePlate(fast_axis_angle, retardance_deviation=retardance_deviation))
         return self
@@ -692,6 +692,345 @@ class MachZehnderInterferometer:
         return (f"MachZehnderInterferometer(ΔL={self.delta_L*1e9:.1f}nm, "
                 f"λ={self.wavelength*1e9:.1f}nm, φ={self.delta_phi:.3f}rad)")
 
+
+
+class FiberCoupler:
+    """
+    Calculate fiber coupling efficiency.
+    
+    Coupling efficiency depends on mode overlap between beam and fiber mode:
+        η = |∫ψ_beam* ψ_fiber dA|² / (∫|ψ_beam|² dA · ∫|ψ_fiber|² dA)
+    
+    For Gaussian beams with matched parameters, this simplifies to:
+        η = 4/[(w_beam/w_fiber + w_fiber/w_beam)² + (λ*R_beam/(π*w_beam*w_fiber))²]
+    
+    Source: Fiber Optics notes, pages 5-7
+    """
+    
+    def __init__(self, wavelength: float):
+        self.wavelength = wavelength
+        self.beam = GaussianBeamTool(wavelength)
+    
+    def coupling_efficiency(self, w_beam: float, R_beam: float,
+                          w_fiber: float) -> float:
+        """
+        Calculate coupling efficiency for mode matching.
+        
+        Math:
+            η = 4 / [(w₁/w₂ + w₂/w₁)² + (λ*R/(π*w₁*w₂))²]
+        
+        Args:
+            w_beam: Beam waist at fiber (meters)
+            R_beam: Beam radius of curvature at fiber (meters, use inf for flat)
+            w_fiber: Fiber mode field diameter / 2 (meters)
+        
+        Returns:
+            Coupling efficiency (0 to 1)
+        
+        Source: Fiber Optics notes, Eq. 15 (page 7)
+        """
+        w_ratio = w_beam / w_fiber
+        
+        if np.isinf(R_beam):
+            curvature_term = 0
+        else:
+            curvature_term = (self.wavelength * R_beam) / (np.pi * w_beam * w_fiber)
+        
+        denominator = (w_ratio + 1/w_ratio)**2 + curvature_term**2
+        return 4 / denominator
+    
+    def numerical_aperture(self, ncore: float, ncladding: float) -> float:
+        """
+        Calculate fiber numerical aperture.
+        
+        Math:
+            NA = √(ncore² - ncladding²)
+        
+        Source: Fiber Optics notes, page 3
+        """
+        return np.sqrt(ncore**2 - ncladding**2)
+
+class FiberOutcoupledBeamSimulator:
+    """
+    Simulate outcoupled-beam measurements for Lab 2.
+
+    Parameters
+    ----------
+    wavelength      : float  – laser wavelength [m]
+    w_laser         : float  – laser beam waist radius before fiber [m]
+    w_fiber_sm      : float  – SM fiber mode-field radius (MFD/2) [m]
+    w_fiber_mm      : float  – MM fiber coupling target radius (≈0.75·r_core) [m]
+    eta_theoretical : float  – mode-overlap η from FiberModeMatchOptimizer (0→1)
+    P_in            : float  – input laser power [W]
+    fiber_type      : str    – 'SM' or 'MM' (controls Q3 polarization model)
+    """
+
+    def __init__(
+        self,
+        wavelength:       float = 633e-9,
+        w_laser:          float = 0.5e-3,
+        w_fiber_sm:       float = 2.0e-6,
+        w_fiber_mm:       float = 18.75e-6,
+        eta_theoretical:  float = 0.95,
+        P_in:             float = 1e-3,
+        fiber_type:       str   = 'SM',
+    ):
+        self.lam            = wavelength
+        self.w_laser        = w_laser
+        self.w_fiber_sm     = w_fiber_sm
+        self.w_fiber_mm     = w_fiber_mm
+        self.eta_theory     = eta_theoretical
+        self.P_in           = P_in
+        self.fiber_type     = fiber_type.upper()
+        self.beam           = GaussianBeamTool(wavelength)
+
+    def coupling_efficiency(
+        self,
+        fresnel_R:     float = 0.04, # air/glass reflection at fiber face
+        fiber_loss_db: float = 3.0,    # fiber transmission loss dB
+        alignment_eff: float = 0.90,   # residual misalignment factor
+        ax: Optional[plt.Axes] = None,
+    ) -> dict:
+        """
+        Parameters
+        ----------
+        fresnel_R     : Fresnel power reflection coefficient at fiber face
+        fiber_loss_db : Total fiber propagation loss in dB
+        alignment_eff : Fractional efficiency due to alignment imperfection
+        """
+        eta_fresnel = 1.0 - fresnel_R
+        eta_fiber   = 10 ** (-fiber_loss_db / 10.0)
+        eta_real    = self.eta_theory * eta_fresnel * eta_fiber * alignment_eff
+        P_out       = self.P_in * eta_real
+
+        labels = [
+            'Mode\noverlap $\\eta_m$',
+            'Fresnel\n$\\eta_F$',
+            'Fiber\nloss $\\eta_f$',
+            'Alignment\n$\\eta_a$',
+        ]
+        values = [self.eta_theory, eta_fresnel, eta_fiber, alignment_eff]
+        colors = ['#4c72b0', '#dd8452', '#55a868', '#c44e52']
+
+        # cumul has length n+1 = 5  (starting from 1 before any loss)
+        cumul = np.cumprod([1] + values) * 100 # shape (5,)
+        n = len(labels) # 4
+
+        own_fig = ax is None
+        if own_fig:
+            _, ax = plt.subplots(figsize=(8, 4))
+
+        ax.bar(np.arange(n), [v * 100 for v in values],
+               color=colors, edgecolor='white', linewidth=1.2, tick_label=labels)
+
+        x_step = np.arange(n + 1) - 0.5 # fixing shape
+        ax.step(x_step, cumul, where='post', color='k', linewidth=2,
+                linestyle='--', label=f'Cumulative → {cumul[-1]:.1f}%')
+
+        ax.axhline(self.eta_theory * 100, color='steelblue', linestyle=':',
+                   linewidth=1.5,
+                   label=f'Mode-overlap only: {self.eta_theory * 100:.1f}%')
+        ax.set_ylabel('Efficiency contribution (%)', fontsize=11)
+        ax.set_ylim(0, 115)
+        ax.set_title(f'Coupling budget ({self.fiber_type})  '
+            f'$P_{{out}}$ ≈ {P_out * 1e3:.2f} mW  '
+            f'($\\eta$ = {eta_real * 100:.1f}%)',
+            fontsize=10, fontweight='bold'
+        )
+        ax.legend(fontsize=8)
+        ax.grid(True, axis='y', alpha=0.3)
+
+        if own_fig:
+            plt.tight_layout()
+
+        return {'eta_mode': self.eta_theory, 'eta_fresnel': eta_fresnel,
+                'eta_fiber': eta_fiber, 'eta_align': alignment_eff,
+                'eta_real': eta_real, 'P_out': P_out}
+
+    def mode_profiles(
+        self,
+        grid_size: int = 300,
+    ) -> plt.Figure:
+        """
+        Simulate 2D intensity profiles before and after the fiber.
+        """
+        x = np.linspace(-3, 3, grid_size)
+        y = np.linspace(-3, 3, grid_size)
+        X, Y = np.meshgrid(x, y)
+        R2 = X**2 + Y**2
+
+        # before fiber: TEM_00 + 5% TEM_10 admixture
+        I_00 = np.exp(-2 * R2)
+        I_10 = (2 * X)**2 * np.exp(-2 * R2)
+        I_10 /= I_10.max()
+        I_before = 0.93 * I_00 + 0.07 * I_10
+        I_before /= I_before.max()
+
+        # after SM fiber: pure TEM_00
+        I_sm = np.exp(-2 * R2)
+        I_sm /= I_sm.max()
+
+        # after MM fiber: speckle
+        a_mm  = 25e-6
+        NA_mm = 0.22
+        N_modes = int(2 * (np.pi * a_mm / self.lam)**2 * NA_mm**2)
+        N_modes = min(N_modes, 300)   # cap for speed
+
+        rng = np.random.default_rng(seed=42)
+        E_speckle = np.zeros((grid_size, grid_size), dtype=complex)
+        for _ in range(N_modes):
+            kx = rng.uniform(-1, 1)
+            ky = rng.uniform(-1, 1)
+            phi = rng.uniform(0, 2 * np.pi)
+            amp = rng.rayleigh(1.0)
+            E_speckle += amp * np.exp(1j * (kx * X + ky * Y + phi))
+
+        I_mm = np.abs(E_speckle)**2
+        mask = R2 > 2.5**2 # clip to a circular aperture (fiber core boundary)
+        I_mm[mask] = 0
+        I_mm = gaussian_filter(I_mm, sigma=0.5)   # mild blur to be realistic
+        I_mm /= I_mm.max()
+
+        fig = plt.figure(figsize=(13, 4))
+        gs  = gridspec.GridSpec(1, 3, wspace=0.35)
+
+        panels = [
+            (I_before, 'Before fiber\n(raw HeNe — TEM$_{00}$ + TEM$_{10}$)', 'inferno'),
+            (I_sm,     'After SM fiber\n(pure TEM$_{00}$ spatial filter)',     'inferno'),
+            (I_mm,     'After MM fiber\n(speckle — many modes interfering)',   'inferno'),
+        ]
+
+        for i, (I, title, cmap) in enumerate(panels):
+            ax = fig.add_subplot(gs[i])
+            im = ax.imshow(I, extent=[-3, 3, -3, 3], origin='lower',
+                           cmap=cmap, vmin=0, vmax=1)
+            ax.set_title(title, fontsize=10, fontweight='bold')
+            ax.set_xlabel('x (beam widths)', fontsize=9)
+            ax.set_ylabel('y (beam widths)', fontsize=9)
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
+                         label='Norm. intensity')
+
+        fig.suptitle('Laser Mode Profiles: Before vs. After Fiber',
+                     fontsize=12, fontweight='bold', y=1.02)
+        plt.tight_layout()
+
+        return fig
+
+    def pbs_polarization(
+        self,
+        t_total:     float = 60.0,   # seconds
+        n_points:    int   = 600,
+        air_event:   float = 15.0,   # seconds when air blast starts
+        shake_event: float = 40.0,   # seconds when shaking starts
+        event_duration: float = 8.0, # duration of each perturbation [s]
+        seed:        int   = 7,
+    ) -> plt.Figure:
+        """
+        Simulate PBS power vs. time with air and shake perturbations.
+        """
+        rng  = np.random.default_rng(seed)
+        t    = np.linspace(0, t_total, n_points)
+        dt   = t[1] - t[0]
+
+        psi_in = np.array([1.0 + 0j, 0.0 + 0j]) # linearly H-polarized
+
+        # noise amplitudes (radians per sqrt(step))
+        if self.fiber_type == 'SM':
+            sigma_quiet = 0.02
+            sigma_air   = 0.20
+            sigma_shake = 0.60
+            n_modes_pol = 1    # one spatial mode, cleaner baseline
+        else:  # MM
+            sigma_quiet = 0.05
+            sigma_air   = 0.40
+            sigma_shake = 1.20
+            n_modes_pol = 5    # average over multiple modes, more scrambled
+
+        # simulate theta and delta as Ornstein-Uhlenbeck processes
+        theta = np.zeros(n_points)
+        delta = np.zeros(n_points)
+        theta[0] = rng.uniform(0, np.pi)
+        delta[0] = rng.uniform(0, 2 * np.pi)
+
+        tau_relax = 10.0  # relaxation time constant [s]
+
+        for i in range(1, n_points):
+            # determine perturbation level at this time step
+            in_air   = air_event   <= t[i] <= air_event   + event_duration
+            in_shake = shake_event <= t[i] <= shake_event + event_duration
+
+            if in_shake:
+                sigma = sigma_shake
+            elif in_air:
+                sigma = sigma_air
+            else:
+                sigma = sigma_quiet
+
+            # Ornstein-Uhlenbeck: mean-reverting random walk
+            dtheta = -(theta[i-1] / tau_relax) * dt + sigma * rng.normal() * np.sqrt(dt)
+            ddelta = -(delta[i-1] / tau_relax) * dt + sigma * rng.normal() * np.sqrt(dt)
+            theta[i] = theta[i-1] + dtheta
+            delta[i] = delta[i-1] + ddelta
+
+        # compute P_H(t)
+        from .helpers import _fiber_jones, _pbs_transmitted_power
+        P_H = np.zeros(n_points)
+        for i in range(n_points):
+            if self.fiber_type == 'SM':
+                T = _fiber_jones(theta[i], delta[i])
+                psi_out = T @ psi_in
+                P_H[i] = _pbs_transmitted_power(psi_out)
+            else:
+                # multi mode: average over n_modes_pol independent polarization modes
+                vals = []
+                for m in range(n_modes_pol):
+                    T_m = _fiber_jones(
+                        theta[i] + m * np.pi / n_modes_pol,
+                        delta[i] + m * 0.8
+                    )
+                    psi_m = T_m @ psi_in
+                    vals.append(_pbs_transmitted_power(psi_m))
+                P_H[i] = float(np.mean(vals))
+
+        P_V = 1.0 - P_H   # power conservation
+
+        fig, axes = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
+
+        ax1, ax2 = axes
+        ax1.plot(t, P_H, color='#4c72b0', linewidth=1.2, label='$P_H$ (PBS transmitted)')
+        ax1.plot(t, P_V, color='#dd8452', linewidth=1.2, linestyle='--',
+                 label='$P_V$ (PBS reflected)')
+        ax1.set_ylabel('Fraction of total power', fontsize=11)
+        ax1.set_ylim(-0.05, 1.10)
+        ax1.legend(fontsize=9)
+        ax1.grid(True, alpha=0.3)
+
+        # Shade perturbation windows
+        for ax in [ax1, ax2]:
+            ax.axvspan(air_event, air_event + event_duration,
+                       color='skyblue', alpha=0.25, label='Air blast')
+            ax.axvspan(shake_event, shake_event + event_duration,
+                       color='salmon', alpha=0.25, label='Shaking')
+
+        ax2.plot(t, theta % np.pi, color='#55a868', linewidth=1.0,
+                 label='Fiber fast-axis θ (mod π)')
+        ax2.plot(t, delta % (2*np.pi) / (2*np.pi), color='#8172b2', linewidth=1.0,
+                 linestyle='-.', label='Fiber retardance δ / 2π')
+        ax2.set_xlabel('Time (s)', fontsize=11)
+        ax2.set_ylabel('Fiber birefringence params.', fontsize=11)
+        ax2.legend(fontsize=9)
+        ax2.grid(True, alpha=0.3)
+
+        # Annotation arrows
+        ax1.annotate('Air blast\n(thermal Δn)', xy=(air_event + event_duration/2, 0.05),
+                     fontsize=8, ha='center', color='steelblue', fontweight='bold')
+        ax1.annotate('Shaking\n(stress Δn)', xy=(shake_event + event_duration/2, 0.05),
+                     fontsize=8, ha='center', color='crimson', fontweight='bold')
+
+        fig.suptitle(f'PBS Power vs. Time with Perturbations ({self.fiber_type} fiber)',fontsize=11, fontweight='bold')
+        plt.tight_layout()
+        return fig
+
 class BowTieCavity:
     """
     Bow-tie cavity with automatic geometry calculations.
@@ -723,6 +1062,7 @@ class BowTieCavity:
         self.L2 = self.d_diagonal + self.W
         
         # Create analyzer
+        from .analyzers import CavityAnalyzer
         self.analyzer = CavityAnalyzer(self.wavelength)
     
     def _build_roundtripcm(self):
@@ -832,628 +1172,6 @@ class BowTieCavity:
         else:
             niceprint(f"**CAVITY UNSTABLE**: {results['g_parameter']:.3f} (must be < 1)")
 
-class TelescopeOptimizer:
-    """
-    Optimize telescope designs for mode matching and fiber coupling.
-    
-    A telescope transforms beam size and position using two lenses:
-        Magnification: M = -f₂/f₁
-        Effective focal length: f_eff = f₁*f₂/(f₁ + f₂ - d)
-    
-    Source: ABCD Matrices notes, Fiber Optics notes
-    """
-    
-    def __init__(self, wavelength: float):
-        self.wavelength = wavelength
-        self.beam = GaussianBeamTool(wavelength)
-    
-    def telescope_abcd(self, f1: float, f2: float, separation: float) -> np.ndarray:
-        """
-        ABCD matrix for a telescope.
-        
-        Math:
-            M = M_lens2 · M_space · M_lens1
-            M = [[1, 0], [-1/f₂, 1]] · [[1, d], [0, 1]] · [[1, 0], [-1/f₁, 1]]
-        
-        Args:
-            f1: First lens focal length
-            f2: Second lens focal length
-            separation: Lens separation
-        
-        Returns:
-            2x2 ABCD matrix
-        """
-        M1 = np.array([[1, 0], [-1/f1, 1]])
-        M_prop = np.array([[1, separation], [0, 1]])
-        M2 = np.array([[1, 0], [-1/f2, 1]])
-        return M2 @ M_prop @ M1
-    
-    def optimize_for_target_waist(self, 
-                                  q_in: complex,
-                                  w_target: float,
-                                  available_lenses: List[float],
-                                  max_separation: float) -> dict:
-        """
-        Find best telescope to achieve target waist.
-        
-        Uses differential evolution to search lens combinations.
-        
-        Args:
-            q_in: Input beam parameter
-            w_target: Target waist size (meters)
-            available_lenses: List of available focal lengths (meters)
-            max_separation: Maximum lens separation (meters)
-        
-        Returns:
-            Dictionary with optimized parameters
-        """
-        def cost_function(params):
-            f1_idx, f2_idx, sep = params
-            f1 = available_lenses[int(f1_idx)]
-            f2 = available_lenses[int(f2_idx)]
-            
-            M = self.telescope_abcd(f1, f2, sep)
-            q_out = self.beam.propagate_q(q_in, M)
-            w_out = self.beam.waist_from_q(q_out)
-            
-            return abs(w_out - w_target)
-        
-        # Bounds: (f1_index, f2_index, separation)
-        bounds = [(0, len(available_lenses) - 1),
-                 (0, len(available_lenses) - 1),
-                 (0.01, max_separation)]
-        
-        result = differential_evolution(cost_function, bounds, seed=42)
-        
-        f1_idx = int(result.x[0])
-        f2_idx = int(result.x[1])
-        separation = result.x[2]
-        
-        f1 = available_lenses[f1_idx]
-        f2 = available_lenses[f2_idx]
-        M = self.telescope_abcd(f1, f2, separation)
-        q_out = self.beam.propagate_q(q_in, M)
-        
-        return {
-            'f1': f1,
-            'f2': f2,
-            'separation': separation,
-            'magnification': -f2/f1,
-            'q_out': q_out,
-            'w_out': self.beam.waist_from_q(q_out),
-            'error': result.fun
-        }
-
-class FiberCoupler:
-    """
-    Calculate fiber coupling efficiency.
-    
-    Coupling efficiency depends on mode overlap between beam and fiber mode:
-        η = |∫ψ_beam* ψ_fiber dA|² / (∫|ψ_beam|² dA · ∫|ψ_fiber|² dA)
-    
-    For Gaussian beams with matched parameters, this simplifies to:
-        η = 4/[(w_beam/w_fiber + w_fiber/w_beam)² + (λ*R_beam/(π*w_beam*w_fiber))²]
-    
-    Source: Fiber Optics notes, pages 5-7
-    """
-    
-    def __init__(self, wavelength: float):
-        self.wavelength = wavelength
-        self.beam = GaussianBeamTool(wavelength)
-    
-    def coupling_efficiency(self, w_beam: float, R_beam: float,
-                          w_fiber: float) -> float:
-        """
-        Calculate coupling efficiency for mode matching.
-        
-        Math:
-            η = 4 / [(w₁/w₂ + w₂/w₁)² + (λ*R/(π*w₁*w₂))²]
-        
-        Args:
-            w_beam: Beam waist at fiber (meters)
-            R_beam: Beam radius of curvature at fiber (meters, use inf for flat)
-            w_fiber: Fiber mode field diameter / 2 (meters)
-        
-        Returns:
-            Coupling efficiency (0 to 1)
-        
-        Source: Fiber Optics notes, Eq. 15 (page 7)
-        """
-        w_ratio = w_beam / w_fiber
-        
-        if np.isinf(R_beam):
-            curvature_term = 0
-        else:
-            curvature_term = (self.wavelength * R_beam) / (np.pi * w_beam * w_fiber)
-        
-        denominator = (w_ratio + 1/w_ratio)**2 + curvature_term**2
-        return 4 / denominator
-    
-    def numerical_aperture(self, ncore: float, ncladding: float) -> float:
-        """
-        Calculate fiber numerical aperture.
-        
-        Math:
-            NA = √(ncore² - ncladding²)
-        
-        Source: Fiber Optics notes, page 3
-        """
-        return np.sqrt(ncore**2 - ncladding**2)
-
-class CavityAnalyzer:
-    """
-    Analyze optical cavity stability and modes.
-    
-    A cavity is stable when the round-trip beam reproduces itself.
-    This requires: 0 < g₁*g₂ < 1
-    
-    where g_i = 1 - L/R_i for each mirror.
-    
-    Source: Optical Cavities notes, pages 1-3
-    """
-    
-    def __init__(self, wavelength: float):
-        self.wavelength = wavelength
-        self.beam = GaussianBeamTool(wavelength)
-    
-    def stability_parameter(self, L1: float, L2: float, 
-                          R1: float, R2: float) -> float:
-        """
-        Calculate g₁*g₂ stability parameter.
-        
-        Math:
-            g₁ = 1 - L₁/R₁
-            g₂ = 1 - L₂/R₂
-            Stable if: 0 < g₁*g₂ < 1
-        
-        Source: Optical Cavities notes, Eq. 5 (page 2)
-        """
-        g1 = 1 - L1/R1 if not np.isinf(R1) else 1
-        g2 = 1 - L2/R2 if not np.isinf(R2) else 1
-        return g1 * g2
-    
-    def cavity_mode_waist(self, L1: float, L2: float,
-                         R1: float, R2: float) -> Tuple[float, float]:
-        """
-        Calculate cavity mode waist size and position.
-        
-        Returns:
-            (w0, z0) - waist size and position from first mirror
-        
-        Source: Optical Cavities notes, pages 3-4
-        """
-        g1 = 1 - L1/R1 if not np.isinf(R1) else 1
-        g2 = 1 - L2/R2 if not np.isinf(R2) else 1
-        
-        L_total = L1 + L2
-        
-        # Waist size
-        w0_sq = (self.wavelength * L_total / np.pi) * np.sqrt(g1 * g2 * (1 - g1*g2)) / abs(g1 + g2 - 2*g1*g2)
-        w0 = np.sqrt(w0_sq)
-        
-        # Waist position from first mirror
-        z0 = L1 * g2 * (1 - g1) / (g1 + g2 - 2*g1*g2)
-        
-        return w0, z0
-    
-    def free_spectral_range(self, L_total: float) -> float:
-        """
-        Calculate free spectral range.
-        
-        Math:
-            FSR = c / (2·L_total)
-        
-        Args:
-            L_total: Total round-trip cavity length (m)
-        
-        Returns:
-            FSR in Hz
-        
-        Source: Optical Cavities notes, page 8
-        """
-        return c / (2 * L_total)
-    
-    def finesse(self, reflectivity: float) -> float:
-        """
-        Calculate cavity finesse.
-        
-        Math:
-            F = π·√R / (1-R)
-        
-        where R is the product of all mirror reflectivities.
-        
-        Args:
-            reflectivity: Total power reflectivity (product of all mirrors)
-        
-        Returns:
-            Finesse (dimensionless)
-        
-        Source: Optical Cavities notes, page 9
-        """
-        R = reflectivity
-        return np.pi * np.sqrt(R) / (1 - R)
-    
-    def linewidth(self, FSR: float, finesse: float) -> float:
-        """
-        Calculate cavity linewidth (FWHM).
-        
-        Math:
-            Δν = FSR / F
-        
-        Args:
-            FSR: Free spectral range (Hz)
-            finesse: Cavity finesse
-        
-        Returns:
-            Linewidth in Hz
-        
-        Source: Optical Cavities notes, page 9
-        """
-        return FSR / finesse
-    
-    def quality_factor(self, frequency: float, linewidth: float) -> float:
-        """
-        Calculate cavity quality factor.
-        
-        Math:
-            Q = ν₀ / Δν
-        
-        Args:
-            frequency: Resonance frequency (Hz)
-            linewidth: Cavity linewidth (Hz)
-        
-        Returns:
-            Quality factor Q (dimensionless)
-        
-        Source: Optical Cavities notes, page 10
-        """
-        return frequency / linewidth
-    
-    def bounce_number(self, finesse: float) -> float:
-        """
-        Average number of round trips photon makes in cavity.
-        
-        Math:
-            N_bounce = F / π
-        
-        Args:
-            finesse: Cavity finesse
-        
-        Returns:
-            Average number of bounces
-        
-        Source: Optical Cavities notes, page 10
-        """
-        return finesse / np.pi
-    
-    def find_eigenmode(self, M: np.ndarray) -> Optional[complex]:
-        """
-        Find the eigenmode q-parameter of the cavity.
-        
-        Eigenmode satisfies: q = (A*q + B) / (C*q + D)
-        Rearranging: C*q^2 + (D-A)*q - B = 0
-        """
-        A, B, C, D = M[0, 0], M[0, 1], M[1, 0], M[1, 1]
-        
-        if abs(C) < 1e-12:
-            # Special case: nearly confocal or degenerate
-            if abs(D - A) < 1e-12:
-                # Highly degenerate - try alternative formulation
-                # For stable cavity, use B / (1 - (A+D)/2) as estimate
-                if abs(1 - (A + D)/2) > 1e-10:
-                    z_R = np.sqrt(abs(B * (1 - (A + D)/2)))
-                    return 1j * z_R
-                return None
-            q = -B / (D - A)
-            # Make sure imaginary part is positive
-            if q.imag <= 0:
-                q = -B / (D - A) * 1j
-        else:
-            # Solve quadratic equation: C*q^2 + (D-A)*q - B = 0
-            # Use: q = [-(D-A) ± sqrt((D-A)^2 + 4BC)] / (2C)
-            discriminant = (D - A)**2 + 4*B*C
-            
-            # For a stable cavity, discriminant should be negative (giving complex q)
-            # If positive, we have an issue
-            if discriminant >= 0:
-                # Try to construct a physical solution anyway
-                sqrt_disc = np.sqrt(abs(discriminant))
-                if discriminant < 0:
-                    sqrt_disc = 1j * sqrt_disc
-                
-                q1 = (-(D - A) + sqrt_disc) / (2*C)
-                q2 = (-(D - A) - sqrt_disc) / (2*C)
-                
-                # Choose solution with positive imaginary part
-                if abs(q1.imag) > abs(q2.imag):
-                    q = q1 if q1.imag > 0 else -np.conj(q1)
-                else:
-                    q = q2 if q2.imag > 0 else -np.conj(q2)
-            else:
-                # discriminant < 0 (normal case for stable cavity)
-                sqrt_disc = np.sqrt(discriminant + 0j)  # Force complex
-                q1 = (-(D - A) + sqrt_disc) / (2*C)
-                q2 = (-(D - A) - sqrt_disc) / (2*C)
-                
-                # Choose solution with positive imaginary part (physical beam)
-                if q1.imag > 0:
-                    q = q1
-                elif q2.imag > 0:
-                    q = q2
-                else:
-                    # Force positive imaginary part
-                    q = q1 if abs(q1.imag) > abs(q2.imag) else q2
-                    if q.imag < 0:
-                        q = -np.conj(q)
-        
-        # Ensure imaginary part is positive
-        if q.imag <= 0:
-            q = q.real + 1j * abs(q.imag)
-            if q.imag == 0:
-                # Last resort: create small positive imaginary part
-                q = q.real + 1j * 1e-6
-        
-        # Verify this is actually an eigenmode
-        qcheck = self.beam.propagate_q(q, M)
-        error = abs(qcheck - q) / abs(q)
-        if error > 0.01:  # 1% relative error
-            warnings.warn(f"Eigenmode verification: relative error = {error:.6f}")
-        
-        return q
-    
-    def full_analysis(self, L1: float, L2: float, R1: float, R2: float,
-                     reflectivity: float) -> Dict:
-        """
-        Perform complete cavity analysis.
-        
-        Args:
-            L1, L2: Cavity arm lengths (m)
-            R1, R2: Mirror radii of curvature (m)
-            reflectivity: Product of all mirror reflectivities
-        
-        Returns:
-            Dictionary with all cavity properties
-        """
-        # Stability
-        g_param = self.stability_parameter(L1, L2, R1, R2)
-        is_stable = 0 < g_param < 1
-        
-        results = {
-            'stable': is_stable,
-            'g_parameter': g_param,
-            'L_total': L1 + L2,
-        }
-        
-        if is_stable:
-            # Mode parameters
-            w0, z0 = self.cavity_mode_waist(L1, L2, R1, R2)
-            results['w0'] = w0
-            results['z0'] = z0
-            
-            # Resonance properties
-            L_total = L1 + L2
-            FSR = self.free_spectral_range(L_total)
-            F = self.finesse(reflectivity)
-            delta_f = self.linewidth(FSR, F)
-            freq = c / self.wavelength
-            Q = self.quality_factor(freq, delta_f)
-            n_bounce = self.bounce_number(F)
-            
-            results['FSR'] = FSR
-            results['finesse'] = F
-            results['linewidth'] = delta_f
-            results['Q'] = Q
-            results['n_bounce'] = n_bounce
-        
-        return results
-
-class ModeMatchOptimizer:
-    """Optimize telescope to match laser into cavity mode"""
-    
-    def __init__(self, cavity: BowTieCavity, laser: LaserBeam, telescope: Telescope, 
-                 d_laser_to_L1: float):
-        """
-        Parameters:
-        -----------
-        cavity : BowTieCavity
-            Analyzed cavity object
-        laser : LaserBeam  
-            Measured laser beam parameters
-        telescope : Telescope
-            Telescope lens focal lengths
-        d_laser_to_L1 : float
-            Distance from laser waist to first lens (cm)
-        """
-        if not cavity.results['stable']:
-            raise ValueError("Cavity is unstable.")
-        
-        self.cavity = cavity
-        self.laser = laser
-        self.telescope = telescope
-        self.d_laser_to_L1 = d_laser_to_L1
-        self.beam = GaussianBeamTool(laser.wavelength)
-        self.wavelength = laser.wavelength
-    
-    def propagate_laser_tocavity(self, d_L1_L2: float, d_L2cavity: float) -> complex:
-        """Propagate laser through telescope to cavity input"""
-        
-        q = self.beam.q_from_waist(self.laser.w0, 0, self.laser.z0_location)
-        
-        self.circuit = OpticalCircuit(wavelength=self.wavelength)
-        self.circuit.add_free_space(self.d_laser_to_L1)
-        self.circuit.add_thin_lens(self.telescope.f1)
-        self.circuit.add_free_space(d_L1_L2)
-        self.circuit.add_thin_lens(self.telescope.f2)
-        self.circuit.add_free_space(d_L2cavity)
-        
-        M_total = self.circuit.get_total_abcd_matrix()
-        
-        return self.beam.propagate_q(q, M_total)
-    
-    def match_quality(self, q_laser: complex, qcavity: complex) -> float:
-        """Calculate mismatch metric"""
-        # Normalize by cavity q magnitude
-        qcav_mag = abs(qcavity)
-        if qcav_mag < 1e-10:
-            return 1e10
-        mismatch = abs(q_laser - qcavity) / qcav_mag
-        return mismatch
-    
-    def coupling_efficiency(self, q_laser: complex, qcavity: complex) -> float:
-        """Calculate mode overlap/coupling efficiency"""
-        w_laser = self.beam.waist_from_q(q_laser)
-        wcavity = self.beam.waist_from_q(qcavity)
-        
-        # Gaussian mode overlap
-        ratio = w_laser / wcavity
-        eta = 4 / (ratio + 1/ratio)**2
-        
-        return eta
-    
-    def objective(self, params: np.ndarray) -> float:
-        """Objective function for optimization"""
-        d_L1_L2, d_L2cavity = params
-        
-        # Physical constraints
-        if d_L1_L2 < 0.5 or d_L1_L2 > 150:
-            return 1e6
-        if d_L2cavity < 1 or d_L2cavity > 150:
-            return 1e6
-        
-        # Propagate laser to cavity input
-        try:
-            q_laser = self.propagate_laser_tocavity(d_L1_L2, d_L2cavity)
-        except:
-            return 1e6
-        
-        # Calculate mismatch
-        return self.match_quality(q_laser, self.cavity.q_at_input)
-    
-    def find_waist_from_q(self, q_at_ref: complex) -> Tuple[float, float]:
-        """
-        Find location and size of beam waist from q-parameter.
-        
-        Returns:
-            z_to_waist: distance from reference point to waist (cm)
-            w0: beam waist size (cm)
-        """
-        # Waist occurs where Re(q) = 0
-        z_to_waist = -q_at_ref.real
-        
-        # Propagate to waist
-        q_at_waist = self.beam.propagate_q(q_at_ref, self.beam.free_space(z_to_waist))
-        
-        # Extract waist size
-        w0 = self.beam.waist_from_q(q_at_waist)
-        
-        return z_to_waist, w0
-    
-    def optimize(self, method='global') -> Dict:
-        """Run optimization"""
-        
-        # Initial guess
-        x0 = [self.telescope.f1 + self.telescope.f2, 30.0]
-        
-        if method == 'global':
-            bounds = [(0.5, 150), (1, 150)]
-            result = differential_evolution(
-                self.objective,
-                bounds,
-                maxiter=300,
-                popsize=15,
-                tol=1e-10,
-                seed=42,
-                disp=False,
-                workers=1
-            )
-        else:
-            result = minimize(
-                self.objective,
-                x0,
-                method='Nelder-Mead',
-                options={'xatol': 1e-6, 'fatol': 1e-10}
-            )
-        
-        # Extract results
-        d_L1_L2_opt, d_L2cavity_opt = result.x
-        
-        # Calculate final parameters
-        q_laser_opt = self.propagate_laser_tocavity(d_L1_L2_opt, d_L2cavity_opt)
-        
-        w_laser = self.beam.waist_from_q(q_laser_opt)
-        R_laser = self.beam.R_from_q(q_laser_opt)
-        wcavity = self.beam.waist_from_q(self.cavity.q_at_input)
-        Rcavity = self.beam.R_from_q(self.cavity.q_at_input)
-        efficiency = self.coupling_efficiency(q_laser_opt, self.cavity.q_at_input)
-        
-        # Propagate to cavity waist
-        self.waist_location = self.cavity.waist_location
-        wcavity_waist = self.cavity.cavity_waist
-        circuit = OpticalCircuit(wavelength=self.wavelength)
-        circuit.add_free_space(self.waist_location)
-        M_total = circuit.get_total_abcd_matrix()
-        q_laser_at_waist = self.beam.propagate_q(q_laser_opt, M_total)
-        w_laser_at_waist = self.beam.waist_from_q(q_laser_at_waist)
-        
-        results = {
-            'd_L1_L2': d_L1_L2_opt,
-            'd_L2cavity': d_L2cavity_opt,
-            'total_distance': self.d_laser_to_L1 + d_L1_L2_opt + d_L2cavity_opt,
-            'mismatch': result.fun,
-            'coupling_efficiency': efficiency,
-            'w_laser_at_input': w_laser,
-            'R_laser_at_input': R_laser,
-            'wcavity_at_input': wcavity,
-            'Rcavity_at_input': Rcavity,
-            'w_laser_atcavity_waist': w_laser_at_waist,
-            'wcavity_waist': wcavity_waist,
-            'success': result.success
-        }
-        
-        return results
-    
-    def print_summary(self, results: Dict):
-        niceprint('---')
-        niceprint(f"**Telescope Optimization**", 3)
-        
-        niceprint(f"<u> Telescope Optimized Distances </u>", 5)
-        niceprint(fr"**Given** laser waist to Lens 1: {self.d_laser_to_L1:8.2f} cm <br>" +
-                  fr"$\rightarrow$ Lens 1 to Lens 2: {results['d_L1_L2']:8.2f} cm <br>" +
-                  fr"$\rightarrow$ Lens 2 to Cavity input: {results['d_L2cavity']:8.2f} cm <br>" +
-                  "───────────────────────── <br>" +
-                  fr"Total path length: {results['total_distance']:8.2f} cm (from source to cavity input)"
-                  )
-        
-        if results['coupling_efficiency'] < 0.85:
-            CE_warning = 'Less than 85% coupling efficiency. Consider adjusting lens distances or focal lengths.'
-        elif results['coupling_efficiency'] > 0.95:
-            CE_warning = 'Coupling efficiency is great, but be aware of sensitivity to misalignment.'
-        else:
-            CE_warning = 'Coupling efficiency is good.'
-        
-        niceprint(f"<u> Optimization Performance </u>", 5)
-        niceprint(f"Coupling efficiency: {results['coupling_efficiency']*100:7.2f} % <br>" +
-                  fr"$\quad$ {CE_warning} <br>" +
-                  f"Mismatch (normalized): {results['mismatch']:7.4f} <br>" +
-                  f"Optimization was {'' if results['success'] else 'not'} successful."
-                  )
-        
-        niceprint(f"<u> Beam Parameters at Cavity Input (M1) </u>", 5)
-        niceprint("**Laser**<br>" +
-                  fr"$\quad$ beam waist: {results['w_laser_at_input']*1e4:7.1f} $\mu m$ <br>" +
-                  fr"$\quad$ radius of curvature: {results['R_laser_at_input']:7.1f} cm <br>" +
-                  "**Cavity mode**<br>" +
-                  fr"$\quad$ beam waist: {results['wcavity_at_input']*1e4:7.1f} $\mu m$ <br>" +
-                  fr"$\quad$ radius of curvature: {results['Rcavity_at_input']:7.1f} cm <br>"
-                  )
-        
-        waist_diff = abs(results['w_laser_atcavity_waist'] - results['wcavity_waist'])/results['wcavity_waist']*100
-        niceprint(f"<u> Beam Parameters at Cavity Waist </u>", 5)
-        niceprint(fr"Laser beam waist at cavity waist: {results['w_laser_atcavity_waist']*1e4:7.1f} $\mu m$ <br>" +
-                  fr"Cavity mode waist (target): {results['wcavity_waist']*1e4:7.1f} $\mu m$ <br>" +
-                  f"Match quality: {waist_diff:6.2f} % difference"
-                  )
-
 class CavityTransmissionSimulator:
     """
     Simulates cavity transmission signal as piezo scans cavity length.
@@ -1489,9 +1207,9 @@ class CavityTransmissionSimulator:
         self.mode_match_efficiency = mode_match_efficiency
         
         # Calculate cavity parameters
-        self.calculate_transmission_parameters()
+        self._calculate_transmission_parameters()
     
-    def calculate_transmission_parameters(self):
+    def _calculate_transmission_parameters(self):
         """Calculate cavity transmission parameters"""
         # Get mirror reflectivities
         R = self.cavity.geometry.R_mirrors
@@ -1513,9 +1231,9 @@ class CavityTransmissionSimulator:
         # Finesse coefficient for Airy function
         # F = 4R/(1-R)^2
         if self.R_rt > 0 and self.R_rt < 1:
-            self.Fcoeff = 4 * self.R_rt / (1 - self.R_rt)**2
+            self.F_coeff = 4 * self.R_rt / (1 - self.R_rt)**2
         else:
-            self.Fcoeff = 0
+            self.F_coeff = 0
         
         # Maximum transmission (on resonance)
         # T_max = T_in * T_out / (1 - sqrt(R_in * R_out * R_other))^2
@@ -1527,9 +1245,9 @@ class CavityTransmissionSimulator:
         
         # Linewidth (FWHM) in Hz
         if self.cavity.results['finesse'] and self.cavity.results['FSR']:
-            self.linewidthhz = self.cavity.results['FSR'] / self.cavity.results['finesse']
+            self.linewidth_hz = self.cavity.results['FSR'] / self.cavity.results['finesse']
         else:
-            self.linewidthhz = None
+            self.linewidth_hz = None
     
     def airy_transmission(self, phase_shift: np.ndarray) -> np.ndarray:
         """
@@ -1547,7 +1265,7 @@ class CavityTransmissionSimulator:
         transmission : np.ndarray
             Intensity transmission coefficient (0-1)
         """
-        return self.T_max / (1 + self.Fcoeff * np.sin(phase_shift / 2)**2)
+        return self.T_max / (1 + self.F_coeff * np.sin(phase_shift / 2)**2)
     
     def cavity_length_to_phase(self, delta_L: float) -> float:
         """
@@ -1594,9 +1312,9 @@ class CavityTransmissionSimulator:
         
         # Convert to displacement (nm/V * V = nm, then convert to cm)
         displacement_nm = self.piezo.displacement_per_volt * voltage
-        displacementcm = displacement_nm * 1e-7  # nm to cm
+        displacement_cm = displacement_nm * 1e-7  # nm to cm
         
-        return displacementcm
+        return displacement_cm
     
     def simulate_transmission(self, duration: float = 0.01, 
                             num_points: int = 10000) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -1714,7 +1432,7 @@ class CavityTransmissionSimulator:
                   f"Round-trip reflectivity: {self.R_rt*100:7.2f} % <br>" +
                   f"Peak transmission (T_max): {self.T_max*100:7.3f} % <br>" +
                   f"Finesse: {self.cavity.results['finesse']:7.1f} <br>" +
-                  (f"Linewidth (FWHM): {self.linewidthhz/1e6:7.2f} MHz <br>" if self.linewidthhz else "") +
+                  (f"Linewidth (FWHM): {self.linewidth_hz/1e6:7.2f} MHz <br>" if self.linewidth_hz else "") +
                   f"Free Spectral Range: {self.cavity.results['FSR']/1e9:7.2f} GHz"
                   )
         
@@ -1761,8 +1479,8 @@ class CavityTransmissionSimulator:
         q_no_tele = optimizer.beam.propagate_q(q_start, M_free_space)
         eff_no_tele = optimizer.coupling_efficiency(q_no_tele, optimizer.cavity.q_at_input)
         
-        wcavity = optimizer.beam.waist_from_q(optimizer.cavity.q_at_input)
-        Rcavity = optimizer.beam.R_from_q(optimizer.cavity.q_at_input)
+        w_cavity = optimizer.beam.waist_from_q(optimizer.cavity.q_at_input)
+        R_cavity = optimizer.beam.R_from_q(optimizer.cavity.q_at_input)
         
         improvement = eff_with_tele / eff_no_tele if eff_no_tele > 0 else np.inf
         
@@ -1801,6 +1519,8 @@ class CavityTransmissionSimulator:
                 f"Peak with telescope:    {V_peak_with_tele*1000:7.2f} mV <br>" +
                 f"Improvement:           {improvement:7.2f}x")
 
+
+
 class SPDCSimulator:
 
     def __init__(self, params: Optional[SPDC] = None):
@@ -1809,6 +1529,7 @@ class SPDCSimulator:
 
     def pump_photon_rate(self, P_pump: float) -> float:
         """Pump photon rate [photons/s] for pump power P_pump [W]."""
+        from .helpers import photon_energy
         return P_pump / photon_energy(self.p.lambda_pump)
 
     def pair_rate(self, P_pump: float) -> float:
@@ -1871,7 +1592,7 @@ class SPDCSimulator:
         for i, theta in enumerate(fast_axis):
             
             circ = OpticalCircuit(wavelength=self.lambda_spdc)
-            circ.addhwp(fast_axis_angle=np.deg2rad(theta))
+            circ.add_hwp(fast_axis_angle=np.deg2rad(theta))
 
             outh = circ.propagate_polarization(H_in)
             out_V = circ.propagate_polarization(V_in)
@@ -1893,7 +1614,8 @@ class SPDCSimulator:
         return R_fringe
 
     def print_summary(self):
-
+        from .helpers import photon_energy
+        
         niceprint('**SPDC Results**', 3)
         
         niceprint(f"<u> SPDC Source Parameters </u>", 5)
@@ -1966,6 +1688,7 @@ class SPDCSimulator:
         V : fringe visibility (lab goal: >0.97 in HV basis)
         phi        : Bell state relative phase [radians]
         """
+        from .helpers import visibility
         if ax is None:
             _, ax = plt.subplots(figsize=(7, 4))
 
@@ -1989,4 +1712,261 @@ class SPDCSimulator:
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         return ax
+
+class PhotonBeamSimulator:
+    """
+    Simulates a photon beam as a Poisson-sampled time-binned stream.
+
+    Each element holds the number of photons counted in one raw time bin
+    of width dt_raw, drawn from Poisson(mu = flux * dt_raw).
+
+    The lab hint: keep dt_raw << 1/flux so that mu << 1.  Longer effective
+    integration times are obtained with boxcar(), which sums n_avg adjacent
+    bins to mimic e.g. the quED's 30 ns coincidence window.
+
+    Poisson distribution (Poisson statistics notes, Eq. 9):
+        P_mu(k) = e^{-mu} * mu^k / k!
+    Mean photons per bin:  mu = flux * dt_raw
+
+    Source: Lab 3b Prelab Problem 3; quED-HBT manual Eq. (2.4)
+    """
+
+    def __init__(self, flux: float, dt_raw: float = 1e-9):
+        """
+        Parameters
+        ----------
+        flux   : average photon flux [photons/s]
+        dt_raw : raw time-bin width [s]  (keep flux * dt_raw << 1)
+        """
+        self.flux   = flux
+        self.dt_raw = dt_raw
+        self.mu_raw = flux * dt_raw
+
+    @classmethod
+    def from_spdc(
+        cls,
+        simulator: 'SPDCSimulator',
+        P_pump: float = None,
+        dt_raw: float = 1e-9,
+    ) -> 'PhotonBeamSimulator':
+        """
+        Create a PhotonBeamSimulator from one detection arm of an SPDCSimulator.
+
+        Single-arm detected flux:
+            flux = pair_rate(P_pump) * eta_1
+
+        Uses SPDCSimulator.pair_rate() and SPDC.eta_1 directly.
+
+        Parameters
+        ----------
+        simulator : SPDCSimulator instance
+        P_pump    : pump power [W]  (defaults to simulator.p.P_max)
+        dt_raw    : raw time-bin width [s]
+        """
+        if P_pump is None:
+            P_pump = simulator.p.P_max
+        flux = simulator.pair_rate(P_pump) * simulator.p.eta_1
+        return cls(flux=flux, dt_raw=dt_raw)
+
+    # ── beam generation ───────────────────────────────────────────────────────
+
+    def generate(self, T_run: float) -> np.ndarray:
+        """
+        Generate one run of Poisson-sampled photon counts.
+
+        Parameters
+        ----------
+        T_run : total run duration [s]
+
+        Returns
+        -------
+        counts : 1-D int array of length n_bins = round(T_run / dt_raw)
+        """
+        n_bins = int(T_run / self.dt_raw)
+        return np.random.poisson(self.mu_raw, size=n_bins)
+
+    def boxcar(self, raw_counts: np.ndarray, n_avg: int) -> np.ndarray:
+        """
+        Coarsen raw bins by summing n_avg consecutive bins.
+
+        Simulates an effective integration time dt_eff = n_avg * dt_raw.
+
+        Parameters
+        ----------
+        raw_counts : 1-D int array from generate()
+        n_avg      : number of raw bins to merge per output bin
+        """
+        n = (len(raw_counts) // n_avg) * n_avg
+        return raw_counts[:n].reshape(-1, n_avg).sum(axis=1)
+
+    # ── HBT beamsplitter ──────────────────────────────────────────────────────
+
+    def HBT_BS(self, raw_counts: np.ndarray) -> tuple:
+        """
+        Simulate a 50:50 beamsplitter acting on the photon stream.
+
+        Each photon independently goes to Arm 1 or Arm 2 with probability
+        1/2, drawn as Binomial(k, 0.5) per bin where k is the bin count.
+
+        Returns
+        -------
+        arm1, arm2 : two 1-D int arrays of the same length as raw_counts
+        """
+        arm1 = np.random.binomial(raw_counts, 0.5)
+        arm2 = raw_counts - arm1
+        return arm1, arm2
+
+    # ── g^(2)(0) ─────────────────────────────────────────────────────────────
+
+    def g2_zero(self, T_run: float) -> float:
+        """
+        Simulate one measurement of g^(2)(0).
+
+        Derived from quED-HBT manual Eq. (2.4) re-written in bin counts:
+
+            g^(2)(0) = R_12 / (R_1 * R_2 * t_c)
+                     = (N_12 * n_bins) / (N_1 * N_2)
+
+        where N_1, N_2 = total counts per arm,
+              N_12 = bins where both arms have >= 1 count,
+              n_bins = T_run / dt_raw.
+
+        Parameters
+        ----------
+        T_run : run duration [s]
+        """
+        counts     = self.generate(T_run)
+        arm1, arm2 = self.HBT_BS(counts)
+
+        N1     = int(arm1.sum())
+        N2     = int(arm2.sum())
+        N12    = int(np.sum((arm1 >= 1) & (arm2 >= 1)))
+        n_bins = len(counts)
+
+        if N1 == 0 or N2 == 0:
+            return np.nan
+
+        return (N12 * n_bins) / (N1 * N2)
+
+    def g2_distribution(self, T_run: float, n_trials: int = 500) -> dict:
+        """
+        Run g^(2)(0) n_trials times and collect statistics.
+
+        Parameters
+        ----------
+        T_run    : run duration per trial [s]
+        n_trials : number of independent trials
+
+        Returns
+        -------
+        dict with keys 'g2_values', 'mean', 'std'
+        """
+        g2_vals = np.array([self.g2_zero(T_run) for _ in range(n_trials)])
+        g2_vals = g2_vals[~np.isnan(g2_vals)]
+        return {
+            'g2_values': g2_vals,
+            'mean':      float(g2_vals.mean()),
+            'std':       float(g2_vals.std()),
+        }
+
+    def plot_g2_distribution(
+        self,
+        T_run: float,
+        n_trials: int = 500,
+        ax: Optional[plt.Axes] = None,
+    ) -> plt.Axes:
+        """Histogram of g^(2)(0) values over many simulated runs."""
+        result    = self.g2_distribution(T_run, n_trials)
+        g2_vals   = result['g2_values']
+        mu, sigma = result['mean'], result['std']
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(7, 4))
+
+        ax.hist(g2_vals, bins=40, color='steelblue', edgecolor='white', alpha=0.85)
+        ax.axvline(mu,  color='crimson', linewidth=2,
+                   label=f'Mean = {mu:.4f}')
+        ax.axvline(1.0, color='gray',   linewidth=1.5, linestyle='--',
+                   label='Coherent light limit = 1')
+        ax.set_xlabel('$g^{(2)}(0)$')
+        ax.set_ylabel('Counts')
+        ax.set_title(
+            f'Distribution of $g^{{(2)}}(0)$ over {n_trials} trials\n'
+            f'Flux = {self.flux:.2e} ph/s,  $T_{{\\rm run}}$ = {T_run:.2f} s\n'
+            f'Mean = {mu:.4f},  Std = {sigma:.4f}'
+        )
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        return ax
+
+    # ── heralded g^(2)_H(0) — Lab Section 3 step 2 ──────────────────────────
+
+    def heralded_g2_zero(
+        self,
+        T_run: float,
+        simulator: 'SPDCSimulator',
+        P_pump: float = None,
+    ) -> float:
+        """
+        Simulate the heralded g^(2)_H(0) measurement.
+
+        Uses SPDCSimulator.pair_rate() and SPDC.eta_1 for the correlated
+        pair flux in the herald arm, consistent with from_spdc().
+
+        Heralded formula (qutools g2-HBT handout, Eq. 16):
+
+            g^(2)_H(0) = (N_123 * N_1) / (N_12 * N_13)
+
+        Channel 0 = herald (quED arm 1, detected with eta_1),
+        channels 1 & 2 = HBT outputs of the other arm.
+        Triple coincidences N_123 arise only from multi-pair events;
+        for a good single-photon source N_123 -> 0 so g^(2)_H -> 0.
+
+        Parameters
+        ----------
+        T_run     : run duration [s]
+        simulator : SPDCSimulator instance
+        P_pump    : pump power [W] (defaults to simulator.p.P_max)
+        """
+        if P_pump is None:
+            P_pump = simulator.p.P_max
+
+        n_bins  = int(T_run / self.dt_raw)
+        mu_pair = simulator.pair_rate(P_pump) * self.dt_raw
+        eta_h   = simulator.p.eta_1
+
+        pairs = np.random.poisson(mu_pair, size=n_bins)
+
+        # herald arm: detect each photon with efficiency eta_h
+        ch0 = np.random.binomial(pairs, eta_h)
+
+        # signal arm: 50:50 HBT split
+        ch1 = np.random.binomial(pairs, 0.5)
+        ch2 = pairs - ch1
+
+        # add uncorrelated background from this beam's own flux
+        bg       = self.generate(T_run)
+        bg1, bg2 = self.HBT_BS(bg)
+        ch1 += bg1
+        ch2 += bg2
+
+        herald = ch0 >= 1
+        N1   = int(herald.sum())
+        N12  = int((herald & (ch1 >= 1)).sum())
+        N13  = int((herald & (ch2 >= 1)).sum())
+        N123 = int((herald & (ch1 >= 1) & (ch2 >= 1)).sum())
+
+        if N12 == 0 or N13 == 0:
+            return np.nan
+
+        return (N123 * N1) / (N12 * N13)
+
+
+
+
+
+
+
+
+
 

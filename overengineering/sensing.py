@@ -9,6 +9,7 @@ from qutip.qip.circuit import QubitCircuit, Gate
 from itertools import combinations
 from scipy.linalg import null_space
 from scipy.optimize import linprog
+import scipy.sparse as sp
 import re
 from typing import Literal
 
@@ -370,40 +371,64 @@ class TrajectorySimulator:
         plt.show()
 
 
-# ─── diagonal entry of R†(T) R(T') ────────────────────────────────────────────
-#
-# R_Z(θ)|j_k⟩ = exp(-iθ/2·(1-2j_k))|j_k⟩     [diagonal action]
-#
-# R^(T)(θ)|j⟩ = exp(-iθ/2 · Σ_{k∈T}(1-2j_k)) |j⟩
-#
-# d^{T,T'}_j = (λ^T_j)* · λ^T'_j
-#            = exp( iθ/2 · Σ_k [1_T(k) - 1_T'(k)] · (1 - 2j_k) )
+def _precompute_exponents(sets, n, N):
+    """
+    Compute the integer exponent array for every trajectory pair.
 
-def _diag(j: int, T: set, Tp: set, n: int, theta: float) -> complex:
-    bits = [(j >> (n - 1 - k)) & 1 for k in range(n)]
-    exp  = sum(((1 if k in T else 0) - (1 if k in Tp else 0)) * (1 - 2*bits[k])
-               for k in range(n))
-    return np.exp(1j * theta / 2 * exp)
+    Returns
+    -------
+    pairs : list of (i, j) index pairs
+    exponents : int8 array of shape (n_pairs, N)
+        exponents[p, j] is the exponent used to compute d^{T,T'}_j.
+    """
+    k_range = np.arange(n)
+    j_range = np.arange(N, dtype=np.int64)
+
+    # bits[j, k] = (j >> (n-1-k)) & 1,  shape (N, n)
+    bits  = ((j_range[:, None] >> (n - 1 - k_range[None, :])) & 1).astype(np.int8)
+    signs = (1 - 2 * bits)  # shape (N, n), entries +/-1
+
+    pairs = list(combinations(range(len(sets)), 2))
+    exponents = np.empty((len(pairs), N), dtype=np.int8)
+    for idx, (i, j_idx) in enumerate(pairs):
+        c = np.array(
+            [(1 if k in sets[i] else 0) - (1 if k in sets[j_idx] else 0)
+             for k in range(n)],
+            dtype=np.int8,
+        )
+        exponents[idx] = signs @ c  # shape (N,)
+
+    return pairs, exponents
 
 
-# ─── build the real linear system A·p = b ──────────────────────────────────────
-#
-# For each off-diagonal trajectory pair (T, T'):
-#   Re[Σ_j p_j · d^{T,T'}_j] = 0
-#   Im[Σ_j p_j · d^{T,T'}_j] = 0
-# Plus normalisation:
-#   Σ_j p_j = 1
+def _build_from_exponents(pairs, exponents, N, theta):
+    """
+    Build the LP constraint matrix for a given theta using precomputed exponents.
+    All N-dimensional work is a single vectorised np.exp() call.
+
+    Returns a sparse CSR matrix A and dense rhs array b.
+    """
+    # d_all[p, j] = exp(i*theta/2 * exponents[p, j]),  shape (n_pairs, N)
+    d_all = np.exp((1j * theta / 2) * exponents.astype(np.float32))
+
+    # Stack real and imaginary rows for each pair, plus normalisation
+    n_pairs = len(pairs)
+    dense_rows = np.empty((2 * n_pairs + 1, N), dtype=np.float64)
+    dense_rows[0:2*n_pairs:2]  = d_all.real
+    dense_rows[1:2*n_pairs:2]  = d_all.imag
+    dense_rows[-1]              = 1.0  # normalisation
+
+    rhs = np.zeros(2 * n_pairs + 1)
+    rhs[-1] = 1.0
+
+    return sp.csr_matrix(dense_rows), rhs
+
 
 def _build(sets, n, N, theta):
-    pairs = list(combinations(range(len(sets)), 2))
-    rows, rhs = [], []
-    for i, j_idx in pairs:
-        d = np.array([_diag(j, sets[i], sets[j_idx], n, theta) for j in range(N)])
-        rows += [d.real, d.imag]
-        rhs  += [0.0, 0.0]
-    rows.append(np.ones(N))
-    rhs.append(1.0)
-    return np.array(rows), np.array(rhs), pairs
+    """Convenience wrapper used by ts_solver (single-theta call, no caching needed)."""
+    pairs, exponents = _precompute_exponents(sets, n, N)
+    A, b = _build_from_exponents(pairs, exponents, N, theta)
+    return A, b, pairs
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -442,17 +467,33 @@ def _cyclic_equality_rows(n: int, N: int):
         ...
     Stacking these with the orthogonality system restricts the LP
     to cyclic-invariant distributions.
+
+    Returns a *sparse* CSR matrix and a dense rhs vector.
+    Each row has exactly 2 non-zero entries, so sparse storage
+    avoids the O(n_rows * N) memory footprint of the dense version.
+    (For 16 qubits this is the difference between ~30 GB and ~1 MB.)
     """
     orbits = _cyclic_orbits(n)
-    rows, rhs = [], []
+
+    # Pre-count rows so we can pre-allocate COO data arrays
+    n_rows = sum(len(orbit) - 1 for orbit in orbits)
+
+    data    = np.empty(2 * n_rows, dtype=np.float64)
+    row_idx = np.empty(2 * n_rows, dtype=np.int32)
+    col_idx = np.empty(2 * n_rows, dtype=np.int32)
+    rhs     = np.zeros(n_rows, dtype=np.float64)
+
+    ptr = 0
+    row = 0
     for orbit in orbits:
         for i in range(len(orbit) - 1):
-            row = np.zeros(N)
-            row[orbit[i]]     =  1.0
-            row[orbit[i + 1]] = -1.0
-            rows.append(row)
-            rhs.append(0.0)
-    return np.array(rows), np.array(rhs)
+            data[ptr]     =  1.0;  row_idx[ptr]     = row;  col_idx[ptr]     = orbit[i]
+            data[ptr + 1] = -1.0;  row_idx[ptr + 1] = row;  col_idx[ptr + 1] = orbit[i + 1]
+            ptr += 2
+            row += 1
+
+    A_cyc = sp.csr_matrix((data, (row_idx, col_idx)), shape=(n_rows, N))
+    return A_cyc, rhs
 
 def ts_solver(trajectories: dict, theta: float, cyclic_constraint: bool, verbose: Literal[True, False, 'off']=True) -> dict:
     """
@@ -482,11 +523,17 @@ def ts_solver(trajectories: dict, theta: float, cyclic_constraint: bool, verbose
     A, b, pairs = _build(sets, n, N, theta)
     if cyclic_constraint:
         A_cyc, b_cyc = _cyclic_equality_rows(n, N)
-        A = np.vstack([A, A_cyc])
+        A = sp.vstack([A, A_cyc], format='csr')
         b = np.hstack([b, b_cyc])
 
     # Null space: degrees of freedom in the probability distribution
-    V = null_space(A, rcond=1e-9)
+    NULLSPACE_MAX_N = 12
+    if n <= NULLSPACE_MAX_N:
+        V = null_space(A.toarray() if sp.issparse(A) else A, rcond=1e-9)
+        null_dim = V.shape[1]
+    else:
+        V = None
+        null_dim = None
 
     # find solution p_j ≥ 0 via linear programming
     lp = linprog(
@@ -514,11 +561,12 @@ def ts_solver(trajectories: dict, theta: float, cyclic_constraint: bool, verbose
         
         else:
             if verbose:
+                null_dim_str = f"{null_dim}" if null_dim is not None else f"(skipped for n={n})"
                 niceprint(f"**Solutions for trajectories {names} at $\\theta = {theta_formatted}\\pi$** <br>" +
                         f"{n} qubits $\\rightarrow$ Hilbert space dimension (# unknowns) {N} <br>" +
                         f"{len(names)} trajectories $\\rightarrow$ {len(pairs)} pairs of orthogonality constraints <br>" +
                         f"# of equations: {2*len(pairs)} from orthogonality + 1 from normalisation = {2*len(pairs)+1} <br>" +
-                        f"Null space dimension: {V.shape[1]}  (degrees of freedom in the probability distribution space)"
+                        f"Null space dimension: {null_dim_str}  (degrees of freedom in the probability distribution space)"
                         )
 
             if verbose != 'off':
@@ -544,16 +592,19 @@ def ts_solver(trajectories: dict, theta: float, cyclic_constraint: bool, verbose
                 # ax.set_title(f"valid probability distribution $p_{{\\text{{feasible}}}}$ for $\\theta$ = {theta_formatted}")
                 # plt.show()
                 
-                null_space_size = V.shape[1]
-                if null_space_size > 3:
-                    pdist_str = f"$p = p_{{\\text{{feasible}}}} + \\alpha_1 \\cdot v_1 + \\ldots + \\alpha_{{{null_space_size}}} \\cdot v_{{{null_space_size}}}$"
+                null_space_size = null_dim
+                if null_space_size is None:
+                    niceprint(f"(Null space dimension not computed for n={n} qubits to avoid memory issues.)")
                 else:
-                    terms = ' + '.join(f'\\alpha_{{{k+1}}} \\cdot v_{{{k+1}}}' for k in range(null_space_size))
-                    pdist_str = f"$p = p_{{\\text{{feasible}}}} + {terms}$"
-                niceprint(f"For the full family of valid initial states, the probability distribution $p$ is: <br>" +
-                        f"$\\quad$ {pdist_str} <br>" +
-                        (f"where $v_k$ are the vectors of the probability distribution (null space of the linear system A·p = b) and and $\\alpha_k$ are arbitrary real numbers (choose them so that $p_j \\geq 0$ for every $j$)" if verbose else "")
-                        )
+                    if null_space_size > 3:
+                        pdist_str = f"$p = p_{{\\text{{feasible}}}} + \\alpha_1 \\cdot v_1 + \\ldots + \\alpha_{{{null_space_size}}} \\cdot v_{{{null_space_size}}}$"
+                    else:
+                        terms = ' + '.join(f'\\alpha_{{{k+1}}} \\cdot v_{{{k+1}}}' for k in range(null_space_size))
+                        pdist_str = f"$p = p_{{\\text{{feasible}}}} + {terms}$"
+                    niceprint(f"For the full family of valid initial states, the probability distribution $p$ is: <br>" +
+                            f"$\\quad$ {pdist_str} <br>" +
+                            (f"where $v_k$ are the vectors of the probability distribution (null space of the linear system A·p = b) and and $\\alpha_k$ are arbitrary real numbers (choose them so that $p_j \\geq 0$ for every $j$)" if verbose else "")
+                            )
     
     return lp.success, p_feasible, n
 
@@ -562,6 +613,10 @@ def find_min_theta(trajectories: dict, n_iters: int = 60, cyclic_constraint: boo
     """
     Find the minimum interaction strength θ_min ∈ (0, π] for which a valid
     trajectory-sensing initial state exists, via binary search on LP feasibility.
+
+    Performance note: exponents and (if cyclic_constraint) A_cyc are precomputed
+    once and reused across all binary-search iterations. Each feasibility check
+    only recomputes the np.exp() call and solves the LP.
     """
     
     clean = {k: set(v) for k, v in trajectories.items()
@@ -576,11 +631,17 @@ def find_min_theta(trajectories: dict, n_iters: int = 60, cyclic_constraint: boo
     n = max(q for s in sets for q in s) + 1
     N = 2 ** n
 
+    # ── precompute once ────────────────────────────────────────────────────────
+    pairs, exponents = _precompute_exponents(sets, n, N)
+
+    A_cyc, b_cyc = (_cyclic_equality_rows(n, N) if cyclic_constraint
+                    else (None, None))
+    # ──────────────────────────────────────────────────────────────────────────
+
     def feasible(theta):
-        A, b, _ = _build(sets, n, N, theta)
+        A, b = _build_from_exponents(pairs, exponents, N, theta)
         if cyclic_constraint:
-            A_cyc, b_cyc = _cyclic_equality_rows(n, N)
-            A = np.vstack([A, A_cyc])
+            A = sp.vstack([A, A_cyc], format='csr')
             b = np.hstack([b, b_cyc])
         lp = linprog(np.zeros(N), A_eq=A, b_eq=b,
                      bounds=[(0, None)] * N, method="highs")

@@ -12,22 +12,10 @@ from scipy.ndimage import gaussian_filter
 
 
 
+
 class GaussianBeamTool:
     """
     Tools for Gaussian beam calculations using ABCD matrices.
-    
-    The complex beam parameter q encodes both beam size and wavefront curvature:
-        1/q = 1/R - i*λ/(π*w²)
-    
-    where:
-        R = radius of curvature of wavefront
-        w = beam width (1/e² intensity radius)
-        λ = wavelength
-    
-    At a beam waist (R → ∞):
-        q = i*z_R  where z_R = π*w₀²/λ (Rayleigh range)
-    
-    Source: ABCD Matrices lecture notes, Eq. 1-3 (pages 1-2)
     """
     
     def __init__(self, wavelength: float):
@@ -41,20 +29,6 @@ class GaussianBeamTool:
     def q_from_waist(self, w0: float, z: float = 0, z0: float = 0) -> complex:
         """
         Calculate q-parameter from beam waist and position.
-        
-        Math:
-            z_R = π*w₀²/λ
-            q(z) = (z - z₀) + i*z_R
-        
-        Args:
-            w0: Beam waist size (meters)
-            z: Position (meters)
-            z0: Waist location (meters, default 0)
-        
-        Returns:
-            Complex beam parameter q
-        
-        Source: ABCD Matrices notes, Eq. 2 (page 1)
         """
         z_R = np.pi * w0**2 / self.lam
         return (z - z0) + 1j * z_R
@@ -62,11 +36,6 @@ class GaussianBeamTool:
     def waist_from_q(self, q: complex) -> float:
         """
         Extract beam waist from q-parameter.
-        
-        Math:
-            w = √(λ*Im(q)/π)
-        
-        Source: ABCD Matrices notes, Eq. 3 (page 2)
         """
         if q.imag <= 0:
             raise ValueError(f"Invalid q: Im(q) = {q.imag} must be positive")
@@ -75,12 +44,6 @@ class GaussianBeamTool:
     def R_from_q(self, q: complex) -> float:
         """
         Extract wavefront radius of curvature from q.
-        
-        Math:
-            R = Re(q) * [1 + (Im(q)/Re(q))²]
-        
-        Returns:
-            Radius of curvature (infinite at waist)
         """
         if abs(q.real) < 1e-10:
             return np.inf
@@ -89,18 +52,6 @@ class GaussianBeamTool:
     def propagate_q(self, q: complex, M: np.ndarray) -> complex:
         """
         Propagate q through ABCD matrix.
-        
-        Math:
-            q' = (A*q + B) / (C*q + D)
-        
-        Args:
-            q: Input beam parameter
-            M: 2x2 ABCD matrix
-        
-        Returns:
-            Output beam parameter
-        
-        Source: ABCD Matrices notes, Eq. 4 (page 2)
         """
         A, B = M[0, 0], M[0, 1]
         C, D = M[1, 0], M[1, 1]
@@ -109,30 +60,18 @@ class GaussianBeamTool:
     def rayleigh_range(self, w0: float) -> float:
         """
         Calculate Rayleigh range.
-        
-        Math: z_R = π*w₀²/λ
-        
-        Source: ABCD Matrices notes, page 1
         """
         return np.pi * w0**2 / self.lam
     
     def divergence_angle(self, w0: float) -> float:
         """
         Far-field divergence half-angle.
-        
-        Math: θ = λ/(π*w₀)
-        
-        Source: ABCD Matrices notes, page 1
         """
         return self.lam / (np.pi * w0)
 
 class QuantumState:
     """
     Represents a quantum state for interferometry and quantum optics.
-    
-    Math: A quantum state is represented as |ψ⟩ = Σᵢ cᵢ|i⟩
-    where |i⟩ are basis states (e.g., different optical paths)
-    and cᵢ are complex probability amplitudes with Σᵢ|cᵢ|² = 1.
     
     Example:
     --------
@@ -167,8 +106,6 @@ class QuantumState:
         """
         Measure probability of finding photon in specified path.
         
-        Math: P(path i) = |⟨i|ψ⟩|² = |cᵢ|²
-        
         Parameters:
         -----------
         path_index : int
@@ -185,8 +122,6 @@ class QuantumState:
     def apply_operator(self, operator: Qobj) -> 'QuantumState':
         """
         Apply unitary operator to state.
-        
-        Math: |ψ_out⟩ = Û|ψ_in⟩
         
         Parameters:
         -----------
@@ -212,15 +147,6 @@ class QuantumState:
 class PhaseShifter:
     """
     Phase shifter for quantum optics.
-    
-    Math: Applies phase shift e^(iφ) to one path
-        Û_φ = [[e^(iφ), 0    ],
-               [0,      1    ]]  (for path 0)
-    
-    Physical meaning:
-    - Adds optical path length Δ = φλ/(2π)
-    - Changes relative phase between paths
-    - Key for interferometer control
     
     Example:
     --------
@@ -295,9 +221,9 @@ class OpticalCircuit:
         self.intensity_out = 0.0
         self.transmission = 0.0
     
-    # -------------------------------------------------------------------------
-    # Component Addition Methods
-    # -------------------------------------------------------------------------
+    # ───────────────────────────────────────────────────────────────────────────
+    # Components
+    # ───────────────────────────────────────────────────────────────────────────
     
     def add_component(self, component: OpticalComponent):
         """Add a custom component to the circuit."""
@@ -355,19 +281,13 @@ class OpticalCircuit:
         self.components.append(PolarizingBeamSplitter(port=port))
         return self
     
-    # -------------------------------------------------------------------------
+    # ───────────────────────────────────────────────────────────────────────────
     # Analysis Methods
-    # -------------------------------------------------------------------------
+    # ───────────────────────────────────────────────────────────────────────────
     
     def get_total_abcd_matrix(self) -> np.ndarray:
         """
         Calculate total ABCD matrix for the circuit.
-        
-        Matrices are composed right-to-left (beam travels through
-        components in the order they were added).
-        
-        Math:
-            M_total = M_N · M_{N-1} · ... · M_2 · M_1
         
         Returns:
             2x2 ABCD matrix for the entire circuit
@@ -427,7 +347,6 @@ class OpticalCircuit:
                          if isinstance(comp, RetroReflectiveMirror)]
         
         if not mirror_indices:
-            # === NO MIRROR: Normal forward propagation ===
             J = self.get_total_jones_matrix()
             state_out = J @ state_in
             
@@ -437,7 +356,6 @@ class OpticalCircuit:
             
             return state_out
         
-        # === MIRROR PRESENT: Automatic forward→mirror→backward handling ===
         if len(mirror_indices) > 1:
             raise ValueError("Circuit can only contain one RetroReflectiveMirror")
         
@@ -446,7 +364,7 @@ class OpticalCircuit:
         mirror = self.components[mirror_idx]
         components_after = self.components[mirror_idx + 1:]
         
-        # Forward path (up to mirror)
+        # forward path (up to mirror)
         state = state_in.copy()
         for component in components_before:
             J = component.get_jones_matrix()
@@ -454,12 +372,12 @@ class OpticalCircuit:
                 state = J @ state
         state_before_mirror = state.copy()
         
-        # Mirror reflection (complex conjugation)
+        # mirror reflection (complex conjugation)
         state = mirror.apply_reflection(state)
         state_after_mirror = state.copy()
         
-        # Backward path (inverse matrices, reversed order)
-        # CRITICAL: Skip polarizers (they're singular/absorptive)
+        # backward path (inverse matrices, reversed order)
+        # skip polarizers (they're singular/absorptive)
         for component in reversed(components_before):
             J = component.get_jones_matrix()
             if J is not None:
@@ -539,7 +457,7 @@ class OpticalCircuit:
         return self
     
     def __repr__(self):
-        return f"OpticalCircuit(λ={self.wavelength*1e9:.1f} nm, {len(self.components)} components)"
+        return f"OpticalCircuit($\\lambda$ = {self.wavelength*1e9:.1f} nm, {len(self.components)} components)"
     
     def __str__(self):
         """Pretty print the circuit."""
@@ -556,23 +474,6 @@ class OpticalCircuit:
 class MachZehnderInterferometer:
     """
     Mach-Zehnder interferometer with quantum state evolution.
-    
-    Configuration:
-                BS1
-               ╱│╲
-              ╱ │ ╲
-          M0 ╱  │  ╲ M1
-            │   │   │
-            │   │   │ (path length difference ΔL)
-             ╲  │  ╱
-              ╲ │ ╱
-               ╲│╱
-                BS2
-    
-    Math: Output probabilities depend on path difference
-        P₀ = cos²(φ/2)
-        P₁ = sin²(φ/2)
-    where φ = 2πn·ΔL/λ is the phase difference.
     
     Example:
     --------
@@ -608,8 +509,7 @@ class MachZehnderInterferometer:
         self.n = n
         self.include_mirrors = include_mirrors
         
-        # Calculate phase shift from path difference
-        # φ = 2π·n·ΔL/λ
+        # phase shift from path difference
         self.delta_phi = (2 * np.pi / wavelength) * n * delta_L
     
     def get_output_probabilities(self) -> Tuple[float, float]:
@@ -675,7 +575,6 @@ class MachZehnderInterferometer:
         P1_array = np.zeros(num_points)
         
         for i, dL in enumerate(delta_L_array):
-            # Create new interferometer with this path difference
             mz_temp = MachZehnderInterferometer(
                 delta_L=dL,
                 wavelength=self.wavelength,
@@ -697,14 +596,6 @@ class MachZehnderInterferometer:
 class FiberCoupler:
     """
     Calculate fiber coupling efficiency.
-    
-    Coupling efficiency depends on mode overlap between beam and fiber mode:
-        η = |∫ψ_beam* ψ_fiber dA|² / (∫|ψ_beam|² dA · ∫|ψ_fiber|² dA)
-    
-    For Gaussian beams with matched parameters, this simplifies to:
-        η = 4/[(w_beam/w_fiber + w_fiber/w_beam)² + (λ*R_beam/(π*w_beam*w_fiber))²]
-    
-    Source: Fiber Optics notes, pages 5-7
     """
     
     def __init__(self, wavelength: float):
@@ -716,9 +607,6 @@ class FiberCoupler:
         """
         Calculate coupling efficiency for mode matching.
         
-        Math:
-            η = 4 / [(w₁/w₂ + w₂/w₁)² + (λ*R/(π*w₁*w₂))²]
-        
         Args:
             w_beam: Beam waist at fiber (meters)
             R_beam: Beam radius of curvature at fiber (meters, use inf for flat)
@@ -726,8 +614,6 @@ class FiberCoupler:
         
         Returns:
             Coupling efficiency (0 to 1)
-        
-        Source: Fiber Optics notes, Eq. 15 (page 7)
         """
         w_ratio = w_beam / w_fiber
         
@@ -752,7 +638,7 @@ class FiberCoupler:
 
 class FiberOutcoupledBeamSimulator:
     """
-    Simulate outcoupled-beam measurements for Lab 2.
+    Simulate outcoupled-beam measurements.
 
     Parameters
     ----------
@@ -1047,11 +933,11 @@ class BowTieCavity:
             geometry: CavityGeometry object with cavity parameters
         """
         self.geometry = geometry
-        self.W = geometry.W * 1e-2  # Convert cm to m
-        self.H = geometry.H * 1e-2  # Convert cm to m
-        self.fconcave = geometry.fconcave * 1e-2  # Convert cm to m
+        self.W = geometry.W
+        self.H = geometry.H
+        self.fconcave = geometry.fconcave
         self.Rconcave = 2 * self.fconcave  # R = 2f for mirror
-        self.wavelength = geometry.wavelength * 1e-2  # Convert cm to m
+        self.wavelength = geometry.wavelength
         
         # Calculate product of reflectivities
         self.reflectivity = np.prod(geometry.R_mirrors)
@@ -1065,16 +951,17 @@ class BowTieCavity:
         from .analyzers import CavityAnalyzer
         self.analyzer = CavityAnalyzer(self.wavelength)
     
-    def _build_roundtripcm(self):
+    def _build_roundtrip(self):
         """
-        Build round-trip ABCD matrix in cm and find the cavity eigenmode q at the input mirror.
+        Build round-trip ABCD matrix and find the cavity eigenmode q at the input mirror.
+        All quantities in SI meters.
         """
-        W   = self.geometry.W             # cm
-        H   = self.geometry.H             # cm
-        f   = self.geometry.fconcave     # cm
-        lam = self.geometry.wavelength    # cm
+        W   = self.geometry.W             # m
+        H   = self.geometry.H             # m
+        f   = self.geometry.fconcave      # m
+        lam = self.geometry.wavelength    # m
 
-        Rconcave = 2 * f                 # radius of curvature in cm
+        Rconcave = 2 * f                 # radius of curvature in m
         d_diag  = np.sqrt(W**2 + (H/2)**2)
         dhoriz = W
 
@@ -1091,21 +978,21 @@ class BowTieCavity:
         A, D = M_rt[0, 0], M_rt[1, 1]
         self.stability_param_rt = abs((A + D) / 2)
         self.is_stable_rt = self.stability_param_rt < 1.0
-        self.cavity_lengthcm = 2 * (d_diag + dhoriz)
+        self.cavity_length = 2 * (d_diag + dhoriz)   # m
 
-        # Eigenmode q at input mirror (in cm)
+        # Eigenmode q at input mirror (in m)
         beam = GaussianBeamTool(lam)
         q_at_input = self.analyzer.find_eigenmode(M_rt)
         self.q_at_input = q_at_input
 
-        # Waist: propagate from M1 to where Re(q)=0
-        z_to_waist = -q_at_input.real   # cm
+        # Waist: propagate from M1 to where Re(q) = 0
+        z_to_waist = -q_at_input.real   # m
         M_to_waist = np.array([[1, z_to_waist], [0, 1]])
         q_at_waist = beam.propagate_q(q_at_input, M_to_waist)
-        self.cavity_waist   = beam.waist_from_q(q_at_waist)   # cm
-        self.waist_location = z_to_waist                       # cm
+        self.cavity_waist   = beam.waist_from_q(q_at_waist)   # m
+        self.waist_location = z_to_waist                       # m
     
-    def analyzecavity(self) -> Dict:
+    def analyze(self) -> Dict:
         """
         Perform complete cavity analysis.
         
@@ -1127,8 +1014,8 @@ class BowTieCavity:
         results['Rconcave'] = self.Rconcave
         self.results = results
         
-        # Compute eigenmode q in cm
-        self._build_roundtripcm()
+        # Compute eigenmode q
+        self._build_roundtrip()
         
         return results
     
@@ -1137,18 +1024,18 @@ class BowTieCavity:
         Print cavity analysis summary using niceprint.
         
         Args:
-            results: Results dict from analyzecavity() (optional)
+            results: Results dict from analyze() (optional)
         """
         if results is None:
-            results = self.analyzecavity()
+            results = self.analyze()
         
         niceprint('---')
         niceprint(f"**Cavity Analysis**", 3)
         
         if results['stable']:
             niceprint(f"<u> Cavity Geometry </u>",5)
-            niceprint(f"width: {self.geometry.W:.2f} cm, height: {self.geometry.H:.2f} cm <br>" +
-                    f"concave mirror focal length: {self.geometry.fconcave:.2f} cm <br>" +
+            niceprint(f"width: {self.geometry.W * 100:.2f} cm, height: {self.geometry.H * 100:.2f} cm <br>" +
+                    f"concave mirror focal length: {self.geometry.fconcave * 100:.2f} cm <br>" +
                     f"round-trip length: {results['L_total']*100:.2f} cm"
                     )
             
@@ -1253,8 +1140,6 @@ class CavityTransmissionSimulator:
         """
         Calculate Airy transmission function.
         
-        T(δ) = T_max / (1 + F * sin²(δ/2))
-        
         Parameters:
         -----------
         phase_shift : np.ndarray
@@ -1271,28 +1156,23 @@ class CavityTransmissionSimulator:
         """
         Convert cavity length change to round-trip phase shift.
         
-        For a change in cavity length ΔL:
-        Δδ = 4π ΔL / λ  (factor of 4π for round-trip)
-        
         Parameters:
         -----------
         delta_L : float
-            Change in cavity length in cm
+            Change in cavity length in m
         
         Returns:
         --------
         phase_shift : float
             Round-trip phase shift in radians
         """
-        wavelength = self.cavity.geometry.wavelength
+        wavelength = self.cavity.geometry.wavelength  # m
         return 4 * np.pi * delta_L / wavelength
     
     def piezo_displacement(self, time: np.ndarray) -> np.ndarray:
         """
-        Calculate piezo displacement as function of time.
-        
-        Triangle wave: displacement = A * sawtooth(2πft, width=0.5)
-        where width=0.5 gives symmetric triangle
+        Calculate piezo displacement as function of time. Uses triangle
+        wave for scanning.
         
         Parameters:
         -----------
@@ -1302,7 +1182,7 @@ class CavityTransmissionSimulator:
         Returns:
         --------
         displacement : np.ndarray
-            Piezo displacement in cm
+            Piezo displacement in m
         """
         # Triangle wave voltage
         voltage = self.piezo.voltage_amplitude * sawtooth(
@@ -1310,11 +1190,11 @@ class CavityTransmissionSimulator:
             width=0.5
         ) + self.piezo.offset_voltage
         
-        # Convert to displacement (nm/V * V = nm, then convert to cm)
+        # Convert to displacement: nm/V * V = nm, then nm → m
         displacement_nm = self.piezo.displacement_per_volt * voltage
-        displacement_cm = displacement_nm * 1e-7  # nm to cm
+        displacement_m = displacement_nm * 1e-9
         
-        return displacement_cm
+        return displacement_m
     
     def simulate_transmission(self, duration: float = 0.01, 
                             num_points: int = 10000) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -1363,7 +1243,7 @@ class CavityTransmissionSimulator:
                          self.detector.gain)
         
         # Convert displacement back to nm for output
-        displacement_nm = displacement / 1e-7
+        displacement_nm = displacement / 1e-9
         
         return time, voltage_output, transmitted_power, displacement_nm
     
@@ -1451,7 +1331,7 @@ class CavityTransmissionSimulator:
                   )
         
         # FSR in terms of displacement
-        wavelength_nm = self.cavity.geometry.wavelength * 1e7  # cm to nm
+        wavelength_nm = self.cavity.geometry.wavelength * 1e9  # m to nm
         FSR_displacement = wavelength_nm / 2  # Half wavelength shift for FSR
         num_FSR_in_scan = (2 * self.piezo.voltage_amplitude * 
                            self.piezo.displacement_per_volt) / FSR_displacement
@@ -1720,15 +1600,9 @@ class PhotonBeamSimulator:
     Each element holds the number of photons counted in one raw time bin
     of width dt_raw, drawn from Poisson(mu = flux * dt_raw).
 
-    The lab hint: keep dt_raw << 1/flux so that mu << 1.  Longer effective
+    Keep dt_raw << 1/flux so that mu << 1.  Longer effective
     integration times are obtained with boxcar(), which sums n_avg adjacent
-    bins to mimic e.g. the quED's 30 ns coincidence window.
-
-    Poisson distribution (Poisson statistics notes, Eq. 9):
-        P_mu(k) = e^{-mu} * mu^k / k!
-    Mean photons per bin:  mu = flux * dt_raw
-
-    Source: Lab 3b Prelab Problem 3; quED-HBT manual Eq. (2.4)
+    bins to mimic i.e. the quED's 30 ns coincidence window.
     """
 
     def __init__(self, flux: float, dt_raw: float = 1e-9):
@@ -1960,7 +1834,6 @@ class PhotonBeamSimulator:
             return np.nan
 
         return (N123 * N1) / (N12 * N13)
-
 
 
 

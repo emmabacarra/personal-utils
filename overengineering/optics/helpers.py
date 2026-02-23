@@ -46,12 +46,7 @@ def _stokes_contrast(n_plus, n_minus) -> float:
 def _analysis_circuit(qwp_angle: float, hwp_angle: float,
                       wavelength: float = 810e-9):
     """
-    Build the QWP → HWP → PBS analysis circuit for one measurement setting.
-
-    Uses the existing OpticalCircuit, QuarterWavePlate, HalfWavePlate, and
-    PolarizingBeamSplitter classes directly.
-
-    Source: quED-TOM manual §2.1.2 (waveplate + PBS measurement scheme).
+    Build the QWP - HWP - PBS analysis circuit for one measurement setting.
     """
     from .simulators import OpticalCircuit
     circ = OpticalCircuit(wavelength=wavelength, name="Analysis Circuit")
@@ -124,12 +119,6 @@ def rho_eigensystem(rho) -> Tuple[np.ndarray, List[Qobj]]:
 def compose_abcd(*matrices: np.ndarray) -> np.ndarray:
     """
     Compose multiple ABCD matrices (right to left).
-    
-    Math:
-        M_total = M_n @ M_{n-1} @ ... @ M_2 @ M_1
-    
-    Example:
-        M_total = compose_abcd(M_lens2, M_space, M_lens1)
     """
     result = np.eye(2)
     for M in reversed(matrices):
@@ -146,47 +135,41 @@ def _fiber_jones(theta: float, delta: float) -> np.ndarray:
     return R @ W @ R.T
 
 def sweep_focal_lengths(
-    laser:          LaserBeam,
-    f_collimator:   float,
-    w_fiber:        float,
-    d_laser_m1:     float,
-    d_m1L1_nom:     float = 0.127,
-    d_12_nom:       float = 0.070,
-    d_L2coll_nom:   float = 0.354,
-    d_m1L1_tol:     float = 0.05,
-    d_12_bounds:    Tuple[float, float] = (0.05, 0.07),
-    d_L2coll_tol:   float = 0.10,
-    top_n:          int   = 10,
+    laser:        LaserBeam,
+    f_collimator: float,
+    w_fiber:      float,
+    d0:           float,
+    d_12:         float,
+    top_n:        int = 10,
 ) -> List[Dict]:
     """
-    Sweep all combinations of (f1, f2) from the available lens set and run
-    FiberModeMatchOptimizer for each, returning the top_n results by coupling
-    efficiency.
+    Sweep all (f1, f2) combinations from the standard lab lens set and run
+    FiberModeMatchOptimizer for each, returning the top_n results ranked by
+    coupling efficiency.
+
+    For each (f1, f2) pair the optimizer finds the optimal L2-to-collimator
+    distance (d_L2coll) while d0 and d_12 are held fixed.
 
     Available focal lengths
     -----------------------
-    Short lenses [m]: 0.050, 0.075, 0.100, 0.150, 0.200, 0.300
-    (These correspond to the lab set in both mm and cm sizes.)
+    50, 75, 100, 150, 200, 300 mm  (standard lab stock)
 
     Parameters
     ----------
-    laser         : LaserBeam with w0 and wavelength set
-    f_collimator  : collimator focal length [m]
-    w_fiber       : fiber mode-field radius [m]
-    d_laser_m1    : fixed laser-to-mirror1 distance [m]
-    d_m1L1_nom    : nominal mirror1-to-L1 distance [m]
-    d_12_nom      : nominal L1-to-L2 distance [m]
-    d_L2coll_nom  : nominal L2-to-collimator distance [m]
-    d_m1L1_tol    : ± search tolerance for d_m1L1 [m]
-    d_12_bounds   : hard (lo, hi) bounds for d_12 [m]
-    d_L2coll_tol  : ± search tolerance for d_L2coll [m]
-    top_n         : number of top results to return and print
+    laser        : LaserBeam with w0 and wavelength set [m]
+    f_collimator : collimator focal length [m]
+    w_fiber      : target fiber mode-field radius (MFD/2) [m]
+    d0           : fixed laser-waist-to-L1 distance [m]
+    d_12         : fixed L1-to-L2 distance [m]
+    top_n        : number of top results to return and print
 
     Returns
     -------
     List of result dicts sorted by coupling_eff descending, each containing
-    all keys from FiberModeMatchOptimizer.optimize() plus f1, f2.
+    all keys from FiberModeMatchOptimizer.optimize() plus 'f1' and 'f2' [m].
     """
+    from .analyzers import FiberModeMatchOptimizer
+
     available_f = [0.050, 0.075, 0.100, 0.150, 0.200, 0.300]  # meters
 
     all_results = []
@@ -196,22 +179,16 @@ def sweep_focal_lengths(
     for f1 in available_f:
         for f2 in available_f:
             tel = Telescope(f1=f1, f2=f2)
-            from .analyzers import FiberModeMatchOptimizer
             opt = FiberModeMatchOptimizer(
-                laser         = laser,
-                telescope     = tel,
-                f_collimator  = f_collimator,
-                w_fiber       = w_fiber,
-                d_laser_m1    = d_laser_m1,
-                d_m1L1_nom    = d_m1L1_nom,
-                d_12_nom      = d_12_nom,
-                d_L2coll_nom  = d_L2coll_nom,
-                d_m1L1_tol    = d_m1L1_tol,
-                d_12_bounds   = d_12_bounds,
-                d_L2coll_tol  = d_L2coll_tol,
+                laser        = laser,
+                telescope    = tel,
+                f_collimator = f_collimator,
+                w_fiber      = w_fiber,
+                d0           = d0,
+                d_12         = d_12,
             )
             r = opt.optimize()
-            all_results.append(r)
+            all_results.append({'f1': f1, 'f2': f2, **r})
 
     all_results.sort(key=lambda x: x["coupling_eff"], reverse=True)
     top = all_results[:top_n]
@@ -220,41 +197,34 @@ def sweep_focal_lengths(
     niceprint(f"**Focal Length Sweep — Top {top_n} Configurations**", 3)
     niceprint(
         f"{'Rank':<5} {'f1 (mm)':<10} {'f2 (mm)':<10} {'η (%)':<10} "
-        f"{'M1→L1 (cm)':<13} {'L1→L2 (cm)':<13} {'L2→coll (cm)':<15} "
-        f"{'w_fiber (μm)':<14} {'Δw (%)'}", 5
+        f"{'L2→coll (cm)':<15} {'w_fiber (μm)':<14} {'Δw (%)'}",
+        5,
     )
     for i, r in enumerate(top, 1):
         dw = abs(r['w_at_fiber'] - r['w_fiber_target']) / r['w_fiber_target'] * 100
         niceprint(
-            f"{i:<5} {r['f1']*1e3:<10.0f} {r['f2']*1e3:<10.0f} "
-            f"{r['coupling_eff']*100:<10.2f} "
-            f"{r['d_m1L1']*1e2:<13.2f} {r['d_12']*1e2:<13.2f} "
-            f"{r['d_L2coll']*1e2:<15.2f} "
-            f"{r['w_at_fiber']*1e6:<14.3f} {dw:.2f}%"
+            f"{i:<5} {r['f1'] * 1e3:<10.0f} {r['f2'] * 1e3:<10.0f} "
+            f"{r['coupling_eff'] * 100:<10.2f} "
+            f"{r['d_L2coll'] * 1e2:<15.2f} "
+            f"{r['w_at_fiber'] * 1e6:<14.3f} {dw:.2f}%"
         )
 
     return top
 
 def sweep_telescope_focal_lengths(
-    laser:              LaserBeam,
-    f_collimator:       float,
-    w_fiber:            float,
-    d_laser_m1:    float,
-    d_m1L1_nom:   float,
-    d_12_nom:           float,
-    d_L2coll_nom:       float,
-    d_m1L1_tol:   float = 0.05,
-    d_12_bounds:        Tuple[float, float] = (0.05, 0.07),
-    d_L2coll_tol:       float = 0.10,
-    top_n:              int = 10,
+    laser:        LaserBeam,
+    f_collimator: float,
+    w_fiber:      float,
+    d0:           float,
+    d_12:         float,
+    top_n:        int = 10,
 ) -> List[Dict]:
     """
     Sweep over all (f1, f2) pairs from the standard available focal lengths
     and find which telescope configuration gives the best fiber coupling.
 
-    For each pair the full 3-variable optimizer is run over
-    (d_mirror1_L1, d_12, d_L2coll) within their respective bounds.
-    Results are ranked by coupling efficiency.
+    For each pair the optimizer finds the optimal L2-to-collimator distance
+    (d_L2coll) while d0 and d_12 are held fixed.
 
     Available focal lengths
     -----------------------
@@ -262,61 +232,45 @@ def sweep_telescope_focal_lengths(
 
     Parameters
     ----------
-    laser             : LaserBeam dataclass
-    f_collimator      : collimator focal length [m]
-    w_fiber           : target fiber mode-field radius (MFD/2) [m]
-    d_laser_m1   : fixed laser-to-mirror1 distance [m]
-    d_m1L1_nom  : nominal mirror1-to-L1 distance [m]
-    d_12_nom          : nominal L1-to-L2 distance [m]
-    d_L2coll_nom      : nominal L2-to-collimator distance [m]
-    d_m1L1_tol  : ± search range around d_m1L1_nom [m]
-    d_12_bounds       : hard (min, max) bounds on d_12 [m]
-    d_L2coll_tol      : ± search range around d_L2coll_nom [m]
-    top_n             : number of top results to print
+    laser        : LaserBeam dataclass [m]
+    f_collimator : collimator focal length [m]
+    w_fiber      : target fiber mode-field radius (MFD/2) [m]
+    d0           : fixed laser-waist-to-L1 distance [m]
+    d_12         : fixed L1-to-L2 distance [m]
+    top_n        : number of top results to print
 
     Returns
     -------
     List of result dicts sorted by coupling_eff descending, each containing
-    all keys from FiberModeMatchOptimizer.optimize() plus f1_mm and f2_mm.
+    all keys from FiberModeMatchOptimizer.optimize() plus 'f1_mm' and 'f2_mm'.
     """
     from .analyzers import FiberModeMatchOptimizer
+
     FOCAL_LENGTHS_M = [f * 1e-3 for f in [50, 75, 100, 150, 200, 300]]
 
     all_results = []
     n_total = len(FOCAL_LENGTHS_M) ** 2
 
     print(f"Sweeping {n_total} focal-length combinations...")
-    i=0
     for f1 in tqdm(FOCAL_LENGTHS_M, leave=False):
         for f2 in FOCAL_LENGTHS_M:
             tel = Telescope(f1=f1, f2=f2)
             opt = FiberModeMatchOptimizer(
-                laser             = laser,
-                telescope         = tel,
-                f_collimator      = f_collimator,
-                w_fiber           = w_fiber,
-                d_laser_m1   = d_laser_m1,
-                d_m1L1_nom  = d_m1L1_nom,
-                d_12_nom          = d_12_nom,
-                d_L2coll_nom      = d_L2coll_nom,
-                d_m1L1_tol  = d_m1L1_tol,
-                d_12_bounds       = d_12_bounds,
-                d_L2coll_tol      = d_L2coll_tol,
+                laser        = laser,
+                telescope    = tel,
+                f_collimator = f_collimator,
+                w_fiber      = w_fiber,
+                d0           = d0,
+                d_12         = d_12,
             )
             r = opt.optimize()
-            all_results.append({
-                'f1_mm': f1 * 1e3,
-                'f2_mm': f2 * 1e3,
-                **r,
-            })
+            all_results.append({'f1_mm': f1 * 1e3, 'f2_mm': f2 * 1e3, **r})
 
     all_results.sort(key=lambda x: x['coupling_eff'], reverse=True)
 
-    # ── Print ranked table ────────────────────────────────────────────────
     header = (
         f"{'Rank':<5} {'f1 (mm)':<10} {'f2 (mm)':<10} {'η (%)':<9}"
-        f" {'w_fiber (μm)':<14} {'m1→L1 (cm)':<13}"
-        f" {'d12 (cm)':<11} {'L2→coll (cm)':<14} {'mismatch':<10}"
+        f" {'d_12 (cm)':<11} {'L2→coll (cm)':<14} {'w_fiber (μm)':<14} {'mismatch':<10}"
     )
     print("\n" + "=" * len(header))
     print(f"  Top {top_n} telescope configurations by coupling efficiency")
@@ -327,17 +281,19 @@ def sweep_telescope_focal_lengths(
     for rank, r in enumerate(all_results[:top_n], 1):
         print(
             f"{rank:<5} {r['f1_mm']:<10.0f} {r['f2_mm']:<10.0f}"
-            f" {r['coupling_eff']*100:<9.2f}"
-            f" {r['w_at_fiber']*1e6:<14.3f}"
-            f" {r['d_m1L1']*1e2:<13.2f}"
-            f" {r['d_12']*1e2:<11.2f}"
-            f" {r['d_L2coll']*1e2:<14.2f}"
+            f" {r['coupling_eff'] * 100:<9.2f}"
+            f" {r['d_12'] * 1e2:<11.2f}"
+            f" {r['d_L2coll'] * 1e2:<14.2f}"
+            f" {r['w_at_fiber'] * 1e6:<14.3f}"
             f" {r['mismatch']:<10.5f}"
         )
 
     print("=" * len(header))
-    print(f"\nBest: f1 = {all_results[0]['f1_mm']:.0f} mm, f2 = {all_results[0]['f2_mm']:.0f} mm"
-          f"  →  η = {all_results[0]['coupling_eff']*100:.2f}%\n")
+    print(
+        f"\nBest: f1 = {all_results[0]['f1_mm']:.0f} mm, "
+        f"f2 = {all_results[0]['f2_mm']:.0f} mm"
+        f"  →  η = {all_results[0]['coupling_eff'] * 100:.2f}%\n"
+    )
 
     return all_results
 
@@ -486,12 +442,12 @@ def plot_cavity_stability_map(R: float, reflectivity: float,
     
     return ax1, ax2
 
-@staticmethod
 def photon_energy(wavelength: float) -> float:
     """Energy [J] of one photon at the given wavelength [m]."""
     return h * c / wavelength
 
-@staticmethod
 def visibility(R_max: float, R_min: float) -> float:
     return (R_max - R_min) / (R_max + R_min)
+
+
 

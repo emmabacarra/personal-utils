@@ -16,21 +16,16 @@ class FiberModeMatchOptimizer:
     """
     Optimize fiber mode-matching for a packaged fiber collimator.
 
-    A fiber collimator is a fixed unit: the fiber tip sits exactly at the
-    back focal point of the collimator lens.  The beam q-parameter is
-    therefore evaluated immediately after the collimator lens — no free-space
-    propagation beyond it.
-
-    The only free variable is d_L2coll, the distance from telescope lens L2
-    to the front of the collimator.  The optimizer minimizes the normalized
-    q-mismatch at the fiber face:
+    Assumes a fixed optical layout with a telescope followed by a fiber
+    collimator. The telescope and fiber parameters are fixed, and the 
+    optimizer adjusts the distance from the second telescope lens to the 
+    collimator `d_L2coll` to achieve optimal mode-matching.
+    
+    The optimizer minimizes the normalized q-mismatch at the fiber face:
 
         mismatch = |q_beam - q_fiber| / |q_fiber|
 
-    where q_fiber = i * π * w_fiber² / λ  (ideal flat-wavefront Gaussian).
-
-    Fixed optical layout:
-        laser waist ─d0─ L1 ─d_12─ L2 ─d_L2coll─ collimator|fiber
+    where q_fiber = i * pi * w_fiber^2 / lambda  (ideal flat-wavefront Gaussian).
     """
 
     def __init__(
@@ -52,7 +47,7 @@ class FiberModeMatchOptimizer:
         self.beam             = GaussianBeamTool(laser.wavelength)
         self.results: Optional[Dict] = None
 
-        # Target q: pure imaginary (flat wavefront) with Im(q) = z_R = π w_fiber² / λ
+        # target q
         self._q_fiber = 1j * (np.pi * w_fiber**2 / laser.wavelength)
 
     def _propagate_to_fiber(self, d_L2coll: float) -> complex:
@@ -73,18 +68,18 @@ class FiberModeMatchOptimizer:
         )
 
         circ = OpticalCircuit(wavelength=self.wavelength)
-        circ.add_free_space(self.d0)               # laser waist → L1
-        circ.add_thin_lens(self.telescope.f1)       # L1
-        circ.add_free_space(self.d_12)   # L1 → L2 (fixed)
-        circ.add_thin_lens(self.telescope.f2)       # L2
-        circ.add_free_space(d_L2coll)               # L2 → collimator front
-        circ.add_thin_lens(self.f_coll)             # collimator lens; fiber is here
+        circ.add_free_space(self.d0) # laser waist to L1
+        circ.add_thin_lens(self.telescope.f1) # L1
+        circ.add_free_space(self.d_12) # L1 to L2 (fixed)
+        circ.add_thin_lens(self.telescope.f2) # L2
+        circ.add_free_space(d_L2coll) # L2 to collimator front
+        circ.add_thin_lens(self.f_coll) # collimator lens; fiber is here
 
         M = circ.get_total_abcd_matrix()
         return self.beam.propagate_q(q0, M)
 
     def _cost(self, params: np.ndarray) -> float:
-        """Normalized |Δq|/|q_fiber| at the fiber face."""
+        """Normalized |Delta q|/|q_fiber| at the fiber face."""
         d_L2coll = params[0]
 
         if d_L2coll < 1e-3 or d_L2coll > 1.0:
@@ -103,9 +98,6 @@ class FiberModeMatchOptimizer:
     def _coupling_efficiency(self, q_at_fiber: complex) -> float:
         """
         Gaussian mode-overlap coupling efficiency.
-
-        Source: Fiber Optics notes, Eq. 15 (page 7)
-            η = 4 / [(w_b/w_f + w_f/w_b)² + (λ R_b / (π w_b w_f))²]
         """
         w_b  = self.beam.waist_from_q(q_at_fiber)
         w_f  = self.w_fiber
@@ -118,15 +110,15 @@ class FiberModeMatchOptimizer:
 
     def optimize(self) -> Dict:
         """
-        Global differential-evolution search over d_L2coll ∈ [1 mm, 1 m].
+        Global differential-evolution search over d_L2coll in [1 mm, 1 m].
 
         Returns
         -------
         dict with keys:
             d_12  – fixed L1-to-L2 spacing [m]
             d_L2coll         – optimized L2-to-collimator distance [m]
-            mismatch         – normalized |Δq|/|q_fiber|
-            coupling_eff     – Gaussian mode overlap η  (0 → 1)
+            mismatch         – normalized |Delta q|/|q_fiber|
+            coupling_eff     – Gaussian mode overlap η  (0 to 1)
             w_at_fiber       – achieved beam waist at fiber face [m]
             R_at_fiber       – wavefront radius of curvature at fiber face [m]
             w_fiber_target   – target fiber mode-field radius [m]
@@ -228,7 +220,7 @@ class ModeMatchOptimizer:
         telescope : Telescope
             Telescope lens focal lengths
         d_laser_to_L1 : float
-            Distance from laser waist to first lens (cm)
+            Distance from laser waist to first lens (m)
         """
         if not cavity.results['stable']:
             raise ValueError("Cavity is unstable.")
@@ -280,10 +272,10 @@ class ModeMatchOptimizer:
         """Objective function for optimization"""
         d_L1_L2, d_L2_cavity = params
         
-        # Physical constraints
-        if d_L1_L2 < 0.5 or d_L1_L2 > 150:
+        # Physical constraints (meters)
+        if d_L1_L2 < 0.005 or d_L1_L2 > 1.5:
             return 1e6
-        if d_L2_cavity < 1 or d_L2_cavity > 150:
+        if d_L2_cavity < 0.01 or d_L2_cavity > 1.5:
             return 1e6
         
         # Propagate laser to cavity input
@@ -300,8 +292,8 @@ class ModeMatchOptimizer:
         Find location and size of beam waist from q-parameter.
         
         Returns:
-            z_to_waist: distance from reference point to waist (cm)
-            w0: beam waist size (cm)
+            z_to_waist: distance from reference point to waist (m)
+            w0: beam waist size (m)
         """
         # Waist occurs where Re(q) = 0
         z_to_waist = -q_at_ref.real
@@ -317,11 +309,11 @@ class ModeMatchOptimizer:
     def optimize(self, method='global') -> Dict:
         """Run optimization"""
         
-        # Initial guess
-        x0 = [self.telescope.f1 + self.telescope.f2, 30.0]
+        # Initial guess (meters)
+        x0 = [self.telescope.f1 + self.telescope.f2, 0.30]
         
         if method == 'global':
-            bounds = [(0.5, 150), (1, 150)]
+            bounds = [(0.005, 1.5), (0.01, 1.5)]
             result = differential_evolution(
                 self.objective,
                 bounds,
@@ -383,11 +375,11 @@ class ModeMatchOptimizer:
         niceprint(f"**Telescope Optimization**", 3)
         
         niceprint(f"<u> Telescope Optimized Distances </u>", 5)
-        niceprint(fr"**Given** laser waist to Lens 1: {self.d_laser_to_L1:8.2f} cm <br>" +
-                  fr"$\rightarrow$ Lens 1 to Lens 2: {results['d_L1_L2']:8.2f} cm <br>" +
-                  fr"$\rightarrow$ Lens 2 to Cavity input: {results['d_L2_cavity']:8.2f} cm <br>" +
+        niceprint(fr"**Given** laser waist to Lens 1: {self.d_laser_to_L1 * 100:8.2f} cm <br>" +
+                  fr"$\rightarrow$ Lens 1 to Lens 2: {results['d_L1_L2'] * 100:8.2f} cm <br>" +
+                  fr"$\rightarrow$ Lens 2 to Cavity input: {results['d_L2_cavity'] * 100:8.2f} cm <br>" +
                   "───────────────────────── <br>" +
-                  fr"Total path length: {results['total_distance']:8.2f} cm (from source to cavity input)"
+                  fr"Total path length: {results['total_distance'] * 100:8.2f} cm (from source to cavity input)"
                   )
         
         if results['coupling_efficiency'] < 0.85:
@@ -406,29 +398,23 @@ class ModeMatchOptimizer:
         
         niceprint(f"<u> Beam Parameters at Cavity Input (M1) </u>", 5)
         niceprint("**Laser**<br>" +
-                  fr"$\quad$ beam waist: {results['w_laser_at_input']*1e4:7.1f} $\mu m$ <br>" +
-                  fr"$\quad$ radius of curvature: {results['R_laser_at_input']:7.1f} cm <br>" +
+                  fr"$\quad$ beam waist: {results['w_laser_at_input'] * 1e6:7.1f} $\mu m$ <br>" +
+                  fr"$\quad$ radius of curvature: {results['R_laser_at_input'] * 100:7.1f} cm <br>" +
                   "**Cavity mode**<br>" +
-                  fr"$\quad$ beam waist: {results['w_cavity_at_input']*1e4:7.1f} $\mu m$ <br>" +
-                  fr"$\quad$ radius of curvature: {results['R_cavity_at_input']:7.1f} cm <br>"
+                  fr"$\quad$ beam waist: {results['w_cavity_at_input'] * 1e6:7.1f} $\mu m$ <br>" +
+                  fr"$\quad$ radius of curvature: {results['R_cavity_at_input'] * 100:7.1f} cm <br>"
                   )
         
         waist_diff = abs(results['w_laser_at_cavity_waist'] - results['w_cavity_waist'])/results['w_cavity_waist']*100
         niceprint(f"<u> Beam Parameters at Cavity Waist </u>", 5)
-        niceprint(fr"Laser beam waist at cavity waist: {results['w_laser_at_cavity_waist']*1e4:7.1f} $\mu m$ <br>" +
-                  fr"Cavity mode waist (target): {results['w_cavity_waist']*1e4:7.1f} $\mu m$ <br>" +
+        niceprint(fr"Laser beam waist at cavity waist: {results['w_laser_at_cavity_waist'] * 1e6:7.1f} $\mu m$ <br>" +
+                  fr"Cavity mode waist (target): {results['w_cavity_waist'] * 1e6:7.1f} $\mu m$ <br>" +
                   f"Match quality: {waist_diff:6.2f} % difference"
                   )
 
 class TelescopeOptimizer:
     """
     Optimize telescope designs for mode matching and fiber coupling.
-    
-    A telescope transforms beam size and position using two lenses:
-        Magnification: M = -f₂/f₁
-        Effective focal length: f_eff = f₁*f₂/(f₁ + f₂ - d)
-    
-    Source: ABCD Matrices notes, Fiber Optics notes
     """
     
     def __init__(self, wavelength: float):
@@ -438,10 +424,6 @@ class TelescopeOptimizer:
     def telescope_abcd(self, f1: float, f2: float, separation: float) -> np.ndarray:
         """
         ABCD matrix for a telescope.
-        
-        Math:
-            M = M_lens2 · M_space · M_lens1
-            M = [[1, 0], [-1/f₂, 1]] · [[1, d], [0, 1]] · [[1, 0], [-1/f₁, 1]]
         
         Args:
             f1: First lens focal length
@@ -520,8 +502,6 @@ class CavityAnalyzer:
     This requires: 0 < g₁*g₂ < 1
     
     where g_i = 1 - L/R_i for each mirror.
-    
-    Source: Optical Cavities notes, pages 1-3
     """
     
     def __init__(self, wavelength: float):
@@ -531,14 +511,7 @@ class CavityAnalyzer:
     def stability_parameter(self, L1: float, L2: float, 
                           R1: float, R2: float) -> float:
         """
-        Calculate g₁*g₂ stability parameter.
-        
-        Math:
-            g₁ = 1 - L₁/R₁
-            g₂ = 1 - L₂/R₂
-            Stable if: 0 < g₁*g₂ < 1
-        
-        Source: Optical Cavities notes, Eq. 5 (page 2)
+        Calculate stability through g parameter.
         """
         g1 = 1 - L1/R1 if not np.isinf(R1) else 1
         g2 = 1 - L2/R2 if not np.isinf(R2) else 1
@@ -551,8 +524,6 @@ class CavityAnalyzer:
         
         Returns:
             (w0, z0) - waist size and position from first mirror
-        
-        Source: Optical Cavities notes, pages 3-4
         """
         g1 = 1 - L1/R1 if not np.isinf(R1) else 1
         g2 = 1 - L2/R2 if not np.isinf(R2) else 1
@@ -572,16 +543,11 @@ class CavityAnalyzer:
         """
         Calculate free spectral range.
         
-        Math:
-            FSR = c / (2·L_total)
-        
         Args:
             L_total: Total round-trip cavity length (m)
         
         Returns:
             FSR in Hz
-        
-        Source: Optical Cavities notes, page 8
         """
         return c / (2 * L_total)
     
@@ -589,18 +555,11 @@ class CavityAnalyzer:
         """
         Calculate cavity finesse.
         
-        Math:
-            F = π·√R / (1-R)
-        
-        where R is the product of all mirror reflectivities.
-        
         Args:
             reflectivity: Total power reflectivity (product of all mirrors)
         
         Returns:
             Finesse (dimensionless)
-        
-        Source: Optical Cavities notes, page 9
         """
         R = reflectivity
         return np.pi * np.sqrt(R) / (1 - R)
@@ -609,17 +568,12 @@ class CavityAnalyzer:
         """
         Calculate cavity linewidth (FWHM).
         
-        Math:
-            Δν = FSR / F
-        
         Args:
             FSR: Free spectral range (Hz)
             finesse: Cavity finesse
         
         Returns:
             Linewidth in Hz
-        
-        Source: Optical Cavities notes, page 9
         """
         return FSR / finesse
     
@@ -627,17 +581,12 @@ class CavityAnalyzer:
         """
         Calculate cavity quality factor.
         
-        Math:
-            Q = ν₀ / Δν
-        
         Args:
             frequency: Resonance frequency (Hz)
             linewidth: Cavity linewidth (Hz)
         
         Returns:
             Quality factor Q (dimensionless)
-        
-        Source: Optical Cavities notes, page 10
         """
         return frequency / linewidth
     
@@ -645,16 +594,11 @@ class CavityAnalyzer:
         """
         Average number of round trips photon makes in cavity.
         
-        Math:
-            N_bounce = F / π
-        
         Args:
             finesse: Cavity finesse
         
         Returns:
-            Average number of bounces
-        
-        Source: Optical Cavities notes, page 10
+            Average number of bounces (dimensionless)
         """
         return finesse / np.pi
     
@@ -736,7 +680,7 @@ class CavityAnalyzer:
     def full_analysis(self, L1: float, L2: float, R1: float, R2: float,
                      reflectivity: float) -> Dict:
         """
-        Perform complete cavity analysis.
+        Complete cavity analysis.
         
         Args:
             L1, L2: Cavity arm lengths (m)
@@ -783,16 +727,7 @@ class CavityAnalyzer:
 
 class QuantumStateTomographer:
     """
-    Full quantum state tomography simulator for Lab 3a.
-
-    Uses OpticalCircuit (QWP → HWP → PBS) internally to simulate every
-    projective polarisation measurement, matching the quED-TOM procedure
-    described in §2.1.2 (1-photon) and §2.2.2 (2-photon).
-
-    For each measurement setting, _analysis_circuit() builds the actual
-    circuit, get_total_jones_matrix() extracts the effective Jones matrix,
-    and the projection ket is read from J†.  Born-rule probabilities are
-    then Poisson-sampled to simulate photon counting.
+    Full quantum state tomography simulator for single and two-photon polarization states.
 
     Parameters
     ----------
@@ -803,31 +738,17 @@ class QuantumStateTomographer:
     wavelength : float
         Photon wavelength (m).  Default 810 nm (quED SPDC output).
     seed : int or None
-
-    Example
-    -------
-    tomo = QuantumStateTomographer(n_counts=20000, wavelength=810e-9)
-
-    H_ket = Qobj(np.array([[1],[0]], dtype=complex))
-    result = tomo.run_1photon(H_ket)
-    tomo.print_summary(result)
-
-    bell = Qobj(np.array([[1],[0],[0],[1]], dtype=complex) / np.sqrt(2))
-    result2 = tomo.run_2photon(bell)
-    tomo.print_summary(result2, label='Bell state')
     """
 
     def __init__(self, n_counts: int = 10000,
                  angle_error_rad: float = 0.0,
                  wavelength: float = 810e-9,
                  seed=None):
-        self.n_counts        = n_counts
+        self.n_counts = n_counts
         self.angle_error_rad = angle_error_rad
-        self.wavelength      = wavelength
-        self.seed            = seed
-        self._rng            = np.random.default_rng(seed)
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
+        self.wavelength = wavelength
+        self.seed = seed
+        self._rng = np.random.default_rng(seed)
 
     def _to_rho(self, state) -> np.ndarray:
         """Return ideal density matrix as (n,n) numpy array."""
@@ -841,10 +762,6 @@ class QuantumStateTomographer:
     def _proj_ket(self, qwp_angle: float, hwp_angle: float) -> np.ndarray:
         """
         Build the analysis circuit and extract the effective projection ket.
-
-        The QWP → HWP → PBS circuit implements a Jones matrix J.  The PBS
-        transmitted port projects onto the first column of J†, which is the
-        ket that the circuit selects.
         """
         from .helpers import _analysis_circuit
         circ = _analysis_circuit(qwp_angle, hwp_angle, self.wavelength)
@@ -862,14 +779,9 @@ class QuantumStateTomographer:
             hwp += self._rng.uniform(-self.angle_error_rad, self.angle_error_rad)
         return qwp, hwp
 
-    # ── Public interface ──────────────────────────────────────────────────────
-
     def run_1photon(self, state) -> dict:
         """
-        Simulate single-photon tomography (quED-TOM §2.1.2).
-
-        Runs 6 OpticalCircuit measurements (one per analysis setting),
-        then reconstructs ρ via density_matrix_1photon.
+        Simulate single-photon tomography.
 
         Parameters
         ----------
@@ -903,9 +815,9 @@ class QuantumStateTomographer:
         props      = rho_properties(rho_noisy)
 
         stokes = {
-            'S1': _stokes_contrast(counts[2], counts[3]),   # D/A → σ₁
-            'S2': _stokes_contrast(counts[4], counts[5]),   # R/L → σ₂
-            'S3': _stokes_contrast(counts[0], counts[1]),   # H/V → σ₃
+            'S1': _stokes_contrast(counts[2], counts[3]),   # D/A
+            'S2': _stokes_contrast(counts[4], counts[5]),   # R/L
+            'S3': _stokes_contrast(counts[0], counts[1]),   # H/V
         }
 
         return {
@@ -920,14 +832,11 @@ class QuantumStateTomographer:
 
     def run_2photon(self, state_2q) -> dict:
         """
-        Simulate two-photon tomography (quED-TOM §2.2.2).
-
-        Runs all 36 coincidence settings.  Each arm independently builds an
-        OpticalCircuit, and the joint projection ket is their tensor product.
-
+        Simulate two-photon tomography.
+        
         Parameters
         ----------
-        state_2q : Qobj (ket or dm), shape 4×1 or 4×4
+        state_2q : Qobj (ket or dm), shape 4x1 or 4x4
             Two-qubit state in {HH, HV, VH, VV} ordering.
 
         Returns
@@ -972,16 +881,7 @@ class QuantumStateTomographer:
         }
 
     def print_summary(self, result: dict, label: str = ""):
-        """
-        Display a tomography result using niceprint and cleandisp.
-
-        Parameters
-        ----------
-        result : dict
-            Output from run_1photon() or run_2photon().
-        label : str
-            Optional header label.
-        """
+        
         niceprint('---')
         niceprint(f"**Quantum State Tomography{': ' + label if label else ''}**", 3)
 
@@ -1015,60 +915,31 @@ class QuantumStateTomographer:
 
 class BellInequalityAnalyzer:
     """
-    Unified CHSH Bell inequality class — real-data analysis and forward simulation.
+    CHSH Bell inequality class for analysis and simulation.
 
-    TWO MODES (independently usable):
+    Usages (independent):
 
-      DATA ANALYSIS — load BellMeasurement rows from real measurements:
-          analyzer = BellInequalityAnalyzer.from_figure1_data(state='triplet')
+      1. Data Analysis - load BellMeasurement rows from real measurements:
+          analyzer = BellInequalityAnalyzer.from_ex_data(state='triplet')
           analyzer.print_S()
 
-      SIMULATION — Poisson-sampled coincidences scaled by SPDCSimulator:
+      2. Simulation - Poisson-sampled coincidences scaled by SPDCSimulator:
           analyzer = BellInequalityAnalyzer(state='triplet', simulator=spdc_sim)
           result = analyzer.run_chsh()
           analyzer.print_chsh_result(result)
           analyzer.plot_correlation_sweep()
 
-      PHOTON STATISTICS (Lab Section 3, no simulator needed):
+      3. Photon Statistics - use static methods to analyze g^2 from raw counts:
           BellInequalityAnalyzer.g2_unheralded(N1, N2, N12, tau, T)
           BellInequalityAnalyzer.g2_heralded(N1, N12, N13, N123)
-
-    Jones-calculus core (_arm_amplitudes, _joint_probs):
-        Models each PBS port as a separate OpticalCircuit with add_polarizer(),
-        propagated via propagate_polarization() — identical pattern to
-        SPDCSimulator.Rcoin_HWP() which uses add_hwp + propagate.
-        T port: Polarizer(alpha),        projected onto H(alpha) = (cos, sin)
-        R port: Polarizer(alpha + pi/2), projected onto V(alpha) = (-sin, cos)
-        This gives all four signed amplitudes (t_H, t_V, r_H, r_V) with correct
-        signs, so P_HH + P_HV + P_VH + P_VV = 1 exactly.
-
-    QM correlations (Entanglement notes, Sec. 3.4):
-        |psi_t> = (|HH> + |VV>) / sqrt(2):  E(a,b) = cos(2a - 2b)
-        |psi_s> = (|HH> - |VV>) / sqrt(2):  E(a,b) = cos(2a + 2b)
-
-    Optimal CHSH settings (Entanglement notes, Eq. 34):
-        Both states: alpha = (0, pi/4),  beta = (-pi/8, pi/8)
-        Both achieve <S>_max = 2*sqrt(2), violating |<S>| <= 2.
-
-    Source: Lab 3b Prelab Problems 5-8; Entanglement notes Secs. 3.3-3.4;
-            qutools g2-HBT manual, Eq. 4 & 13;
-            Clauser et al., PRL 23, 880 (1969).
     """
 
     # Optimal CHSH angles for both Bell states [radians].
-    # Both use alpha=(0, pi/4), beta=(-pi/8, pi/8) with the standard
-    # CHSH formula S = E(a1,b1) + E(a1,b2) + E(a2,b1) - E(a2,b2).
-    # Note: beta = 5pi/8 is NOT equivalent here — it changes the sign
-    # structure and gives <S> = 0 with the standard formula.
-    # Source: Entanglement notes, Eq. 34 (page 11).
+    # CHSH formula S = E(a1,b1) + E(a1,b2) + E(a2,b1) - E(a2,b2)
     CHSH_ANGLES = {
-        'singlet': {'alpha': (0.0,       np.pi / 4), 'beta': (-np.pi / 8,  np.pi / 8)},
-        'triplet': {'alpha': (0.0,       np.pi / 4), 'beta': ( np.pi / 8, -np.pi / 8)},
+        'singlet': {'alpha': (0.0, np.pi / 4), 'beta': (-np.pi / 8,  np.pi / 8)},
+        'triplet': {'alpha': (0.0, np.pi / 4), 'beta': ( np.pi / 8, -np.pi / 8)},
     }
-
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
 
     def __init__(
         self,
@@ -1101,10 +972,6 @@ class BellInequalityAnalyzer:
         for m in self.measurements:
             self._index[(round(m.alpha, 4), round(m.beta, 4))] = m
 
-    # ------------------------------------------------------------------
-    # Real-data helpers
-    # ------------------------------------------------------------------
-
     def add_measurement(self, m: BellMeasurement):
         """Add one BellMeasurement row to the real-data index."""
         self.measurements.append(m)
@@ -1117,9 +984,9 @@ class BellInequalityAnalyzer:
         return self._index[key]
 
     @classmethod
-    def from_figure1_data(cls, **kwargs) -> 'BellInequalityAnalyzer':
+    def from_ex_data(cls, **kwargs) -> 'BellInequalityAnalyzer':
         """
-        Return an analyzer pre-loaded with the Lab 3b Figure 1 dataset.
+        Return an analyzer from an example dataset.
 
         Acquisition time T = 15 s, coincidence window tau = 25 ns.
         All 16 combinations of Alice angles {-45, 0, 45, 90} deg and
@@ -1152,10 +1019,10 @@ class BellInequalityAnalyzer:
         ]
         return cls(measurements=measurements, **kwargs)
 
-    # ------------------------------------------------------------------
-    # Real-data analysis: E and <S>
-    # ------------------------------------------------------------------
-
+    # ───────────────────────────────────────────────────────────────────────────
+    # Data Analysis Methods
+    # ───────────────────────────────────────────────────────────────────────────
+    
     @staticmethod
     def compute_E(N_pp: float, N_pm: float, N_mp: float, N_mm: float
                   ) -> Tuple[float, float]:
@@ -1230,7 +1097,7 @@ class BellInequalityAnalyzer:
                 'S': S, 'sigma_S': sigma_S}
 
     def print_S(self, state: Optional[str] = None):
-        """Print a formatted CHSH result from real data using niceprint."""
+        
         result = self.compute_S(state)
         label  = 's' if result['state'] == 'singlet' else 't'
         niceprint(f"**CHSH Bell Inequality (data) — $|\\psi_{{{label}}}\\rangle$**", 4)
@@ -1243,22 +1110,14 @@ class BellInequalityAnalyzer:
                 if abs(S) > 2 else " — No violation detected")
         )
 
-    # ------------------------------------------------------------------
-    # Simulation core — uses OpticalCircuit + Polarizer from components.py
-    # ------------------------------------------------------------------
+    # ───────────────────────────────────────────────────────────────────────────
+    # Simulation Methods
+    # ───────────────────────────────────────────────────────────────────────────
 
     def _arm_amplitudes(self, angle: float) -> Tuple[complex, complex, complex, complex]:
         """
         Transmission (T) and reflection (R) amplitudes for |H> and |V> inputs
-        through a PBS at angle [radians].  Uses OpticalCircuit.add_polarizer() +
-        propagate_polarization() — same pattern as Rcoin_HWP uses add_hwp + propagate.
-
-        A Polarizer Jones matrix is J = |H(a)><H(a)|.  Projecting J|E_in> onto
-        V_alpha = (-sin, cos) always gives 0 because J absorbs the V component.
-        The PBS reflected port is therefore modeled as a SECOND Polarizer circuit
-        at angle + pi/2, so its transmission axis IS V_alpha:
-          T port: Polarizer(angle),        projected onto H(angle) = (cos a,  sin a)
-          R port: Polarizer(angle + pi/2), projected onto V(angle) = (-sin a, cos a)
+        through a PBS at angle [radians].
 
         Returns
         -------
@@ -1286,20 +1145,6 @@ class BellInequalityAnalyzer:
     def _joint_probs(self, alpha: float, beta: float) -> Tuple[float, float, float, float]:
         """
         Compute P_HH, P_HV, P_VH, P_VV from OpticalCircuit amplitudes.
-
-        For |psi> = (1/sqrt(2))(|HH> + sign*|VV>), the amplitude for joint
-        outcome (X at alpha, Y at beta) is:
-
-            A_XY = (t_X^(a) * t_Y^(b) + sign * t_X'^(a) * t_Y'^(b)) / sqrt(2)
-
-        where t_X^(a) is the T-port amplitude for |X> at polarizer alpha,
-        and t_X'^(a) is the R-port amplitude — both from _arm_amplitudes().
-        sign = +1 (triplet) or -1 (singlet).
-
-        Visibility mixes QM probabilities with a uniform 1/4 background:
-            P_obs = V * P_QM + (1 - V) * 1/4
-
-        Source: Entanglement notes, Section 3.4 (pages 11-12).
         """
         t_aH, t_aV, r_aH, r_aV = self._arm_amplitudes(alpha)
         t_bH, t_bV, r_bH, r_bV = self._arm_amplitudes(beta)
@@ -1319,10 +1164,7 @@ class BellInequalityAnalyzer:
             V * abs(A_VV)**2 + (1 - V) * bg,
         )
 
-    # ------------------------------------------------------------------
-    # Simulation: Poisson-sampled counts at one setting
-    # ------------------------------------------------------------------
-
+    # single setting sampling of Poisson counts ─────────────────────────────────
     def sample_counts(
         self,
         alpha: float,
@@ -1332,9 +1174,6 @@ class BellInequalityAnalyzer:
     ) -> Dict:
         """
         Simulate Poisson coincidence counts at one (alpha, beta) setting.
-
-        Uses _joint_probs() for probabilities and SPDCSimulator.Rcoin_W()
-        for the expected total rate — mirroring the pattern in Rcoin_HWP().
 
         Parameters
         ----------
@@ -1347,7 +1186,7 @@ class BellInequalityAnalyzer:
         dict with N_HH, N_HV, N_VH, N_VV, N_tot, E, sigma_E
         """
         if self.sim is None:
-            raise RuntimeError("sample_counts requires a SPDCSimulator — pass one to __init__")
+            raise RuntimeError("sample_counts requires a SPDCSimulator. pass one to __init__")
         if P_pump is None:
             P_pump = self.sim.p.P_max
 
@@ -1368,10 +1207,7 @@ class BellInequalityAnalyzer:
         return dict(N_HH=N_HH, N_HV=N_HV, N_VH=N_VH, N_VV=N_VV,
                     N_tot=N_tot, E=E, sigma_E=sigma_E)
 
-    # ------------------------------------------------------------------
-    # Simulation: full CHSH run
-    # ------------------------------------------------------------------
-
+    # full CHSH run with Poisson sampling at each of the 4 settings ─────────────
     def run_chsh(self, P_pump: Optional[float] = None, T_acq: float = 15.0) -> Dict:
         """
         Simulate the full 4-setting CHSH experiment.
@@ -1412,8 +1248,8 @@ class BellInequalityAnalyzer:
                 'S_theory': self.visibility * 2.0 * np.sqrt(2.0),
                 'violates': abs(S) > 2.0}
 
-    def print_chsh_result(self, result: Dict):
-        """Print a formatted CHSH simulation result using niceprint."""
+    def print_summary(self, result: Dict):
+        
         label = 's' if self.state == 'singlet' else 't'
         niceprint(
             f"**CHSH Result (simulation) — $|\\psi_{{{label}}}\\rangle$,"
@@ -1422,12 +1258,8 @@ class BellInequalityAnalyzer:
         niceprint(
             f"$\\langle S \\rangle = {result['S']:.4f} \\pm {result['sigma_S']:.4f}$  "
             f"QM prediction: $2\\sqrt{{2}}\\cdot V = {result['S_theory']:.4f}$  "
-            f"Violates Bell: {'**Yes ✓**' if result['violates'] else 'No ✗'}"
+            f"Violates Bell: {'**Yes** <span style="color:green">&#x2713;</span>' if result['violates'] else '**No** <span style="color:red">&#x2717;</span>'}"
         )
-
-    # ------------------------------------------------------------------
-    # Lab Section 4 — correlation sweep (theory + simulated noise)
-    # ------------------------------------------------------------------
 
     def plot_correlation_sweep(
         self,
@@ -1438,11 +1270,7 @@ class BellInequalityAnalyzer:
         ax: Optional[plt.Axes] = None,
     ) -> plt.Axes:
         """
-        Plot E(alpha, beta) vs. beta with alpha fixed (Lab Section 4).
-
-        Theory curve from _joint_probs(); simulated data points at 5-degree
-        steps from sample_counts() (only drawn if simulator is set).
-        CHSH beta positions marked for reference.
+        Plot E(alpha, beta) vs. beta with alpha fixed.
 
         Parameters
         ----------
@@ -1484,7 +1312,7 @@ class BellInequalityAnalyzer:
         ax.set_ylabel(r'$E(\alpha,\,\beta)$')
         label = 's' if self.state == 'singlet' else 't'
         ax.set_title(
-            f'Correlation sweep — $|\\psi_{{{label}}}\\rangle$,  '
+            f'Correlation sweep: $|\\psi_{{{label}}}\\rangle$,  '
             f'$\\alpha = {np.rad2deg(fixed_alpha):.1f}^\\circ$,  '
             f'$V = {self.visibility:.2f}$'
         )
@@ -1499,15 +1327,14 @@ class BellInequalityAnalyzer:
         """
         Four-panel figure: one panel per canonical Alice setting {H, V, P, M},
         each showing the full correlation sweep vs. Bob's angle.
-        Simulates the complete Lab Section 4 procedure.
         """
         alice_settings = [0.0, np.pi / 2, np.pi / 4, -np.pi / 4]
-        alice_labels   = ['H ($0°$)', 'V ($90°$)', 'P ($45°$)', 'M ($-45°$)']
+        alice_labels   = ['H ($0^\\circ$)', 'V ($90^\\circ$)', 'P ($45^\\circ$)', 'M ($-45^\\circ$)']
         label = 's' if self.state == 'singlet' else 't'
 
         fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharey=True)
         fig.suptitle(
-            f'Correlation Sweeps — $|\\psi_{{{label}}}\\rangle$,  $V = {self.visibility:.2f}$',
+            f'Correlation Sweeps: $|\\psi_{{{label}}}\\rangle$,  $V = {self.visibility:.2f}$',
             fontsize=13, fontweight='bold'
         )
         for ax, alpha, lbl in zip(axes.flat, alice_settings, alice_labels):
@@ -1516,24 +1343,16 @@ class BellInequalityAnalyzer:
         plt.tight_layout()
         return fig
 
-    # ------------------------------------------------------------------
-    # Lab Section 3 — g^(2)(0) photon statistics
-    # ------------------------------------------------------------------
+    # ───────────────────────────────────────────────────────────────────────────
+    # Photon Statistics Methods (g^(2) analysis)
+    # ───────────────────────────────────────────────────────────────────────────
 
     @staticmethod
     def g2_unheralded(
         N1: float, N2: float, N12: float, tau: float, T: float,
     ) -> Tuple[float, float]:
         """
-        Unheralded g^(2)(0).
-
-        g^(2)(0) < 1 signals a non-classical (sub-Poissonian) source.
-        For a true single-photon source g^(2)(0) = 0 because a single photon
-        cannot split at a beamsplitter.
-
-        Formula (qutools g2-HBT manual, Eq. 4):
-            N_ac = N_1 * N_2 * tau / T
-            g^(2)(0) = N_12 / N_ac,   sigma = sqrt(N_12) / N_ac
+        Unheralded g^(2)(0)
 
         Parameters
         ----------
@@ -1556,13 +1375,6 @@ class BellInequalityAnalyzer:
         """
         Heralded g^(2)(0) from a three-fold coincidence measurement.
 
-        Herald photon at detector 1 announces a pair; heralded photon is routed
-        to a 50:50 BS with detectors 2 and 3.  A true single photon goes to
-        only one output, so N_123 -> 0 for a perfect source.
-
-        Formula (qutools g2-HBT manual, Eq. 13):
-            g^(2)_H(0) = N_123 * N_1 / (N_12 * N_13)
-
         Parameters
         ----------
         N1       : herald singles
@@ -1581,14 +1393,18 @@ class BellInequalityAnalyzer:
         N1: float, N2: float, N12: float, tau: float, T: float,
         N13: Optional[float] = None, N123: Optional[float] = None,
     ):
-        """Print g^(2)(0) for unheralded and optionally heralded cases."""
+        # unheralded
         g2, sg2 = self.g2_unheralded(N1, N2, N12, tau, T)
         niceprint("**Photon Statistics** — $g^{(2)}(0)$", 4)
         niceprint(f"Unheralded: $g^{{(2)}}(0) = {g2:.4f} \\pm {sg2:.4f}$"
-                  + (" — **non-classical!** ($< 0.5$)" if g2 < 0.5 else ""))
+                  + ("**non-classical:** ($< 0.5$)" if g2 < 0.5 else ""))
+        
+        # heralded (optional)
         if N13 is not None and N123 is not None:
             g2_H, sg2_H = self.g2_heralded(N1, N12, N13, N123)
             niceprint(f"Heralded: $g^{{(2)}}_H(0) = {g2_H:.4f} \\pm {sg2_H:.4f}$"
-                      + (" — **single photon confirmed!** ($< 0.5$)" if g2_H < 0.5 else ""))
+                      + ("**single photon confirmed:** ($< 0.5$)" if g2_H < 0.5 else ""))
+
+
 
 

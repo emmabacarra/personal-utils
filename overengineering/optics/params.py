@@ -5,27 +5,27 @@ from dataclasses import dataclass
 
 @dataclass
 class CavityGeometry:
-    """Bow-tie cavity geometry parameters (all in cm for compatibility)"""
-    W: float  # Width of bow-tie cavity in cm
-    H: float  # Height of bow-tie cavity in cm
-    fconcave: float  # Focal length of concave mirror in cm
+    """Bow-tie cavity geometry parameters (SI meters throughout)"""
+    W: float  # Width of bow-tie cavity in m
+    H: float  # Height of bow-tie cavity in m
+    fconcave: float  # Focal length of concave mirror in m
     R_mirrors: List[float]  # Reflectivities [R_input, R_output, R_flat1, R_flat2]
-    wavelength: float  # Wavelength in cm
+    wavelength: float  # Wavelength in m
 
 
 @dataclass
 class LaserBeam:
-    """Laser beam parameters (in cm for compatibility)"""
-    w0: float  # Beam waist in cm
-    z0_location: float  # Distance from reference point to waist in cm
-    wavelength: float  # Wavelength in cm
+    """Laser beam parameters (SI meters throughout)"""
+    w0: float  # Beam waist radius in m
+    z0_location: float  # Distance from reference point to beam waist in m
+    wavelength: float  # Wavelength in m
 
 
 @dataclass
 class Telescope:
-    """Telescope lens parameters (in cm)"""
-    f1: float  # Focal length of first lens in cm
-    f2: float  # Focal length of second lens in cm
+    """Telescope lens parameters (SI meters throughout)"""
+    f1: float  # Focal length of first lens in m
+    f2: float  # Focal length of second lens in m
 
 
 @dataclass
@@ -80,8 +80,6 @@ class BellMeasurement:
     N     : Raw coincidence counts
     N_ac  : Accidental coincidences = tau * N_A * N_B / T
             where tau is the coincidence time window and T is the run length.
-
-    Source: Lab 3b manual, Section 4; qutools quED manual, Section 2.1.2
     """
     alpha: float
     beta:  float
@@ -94,6 +92,5 @@ class BellMeasurement:
     def N_net(self) -> float:
         """Net coincidences after subtracting accidentals."""
         return self.N - self.N_ac
-
 
 

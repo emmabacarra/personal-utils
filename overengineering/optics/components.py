@@ -41,8 +41,6 @@ class FreeSpace(OpticalComponent):
     ABCD Matrix:
         M = [[1, d],
              [0, 1]]
-    
-    Source: ABCD Matrices notes, Eq. 5 (page 2)
     """
     
     def __init__(self, distance: float, name: str = "Free Space"):
@@ -63,8 +61,6 @@ class ThinLens(OpticalComponent):
     ABCD Matrix:
         M = [[1,    0],
              [-1/f, 1]]
-    
-    Source: ABCD Matrices notes, Eq. 6 (page 3)
     """
     
     def __init__(self, focal_length: float, name: str = "Thin Lens"):
@@ -80,14 +76,14 @@ class ThinLens(OpticalComponent):
 
 class Mirror:
     """
-    Mirror for quantum optics (introduces π phase shift).
+    Mirror for quantum optics (introduces pi phase shift).
     
-    Math: Reflection introduces π phase shift
-        Û_mirror = -I = [[-1, 0 ],
-                         [0, -1]]
+    Math: Reflection introduces pi phase shift
+        U = -I = [[-1, 0 ],
+                  [0, -1]]
     
     Physical meaning:
-    - Reflection causes π phase shift (flips sign)
+    - Reflection causes pi phase shift (flips sign)
     - Important for interferometer analysis
     
     Note: Can specify which path gets reflected (for asymmetric setups)
@@ -98,8 +94,8 @@ class Mirror:
         Parameters:
         -----------
         path_index : int or None
-            If specified, only that path gets π shift
-            If None, all paths get π shift
+            If specified, only that path gets pi shift
+            If None, all paths get pi shift
         """
         self.path_index = path_index
     
@@ -107,10 +103,10 @@ class Mirror:
         """Get quantum operator for mirror"""
         data = np.eye(num_paths, dtype=complex)
         if self.path_index is None:
-            # All paths get π shift
+            # All paths get pi shift
             data = -data
         else:
-            # Only specified path gets π shift
+            # Only specified path gets pi shift
             data[self.path_index, self.path_index] = -1
         return Qobj(data)
     
@@ -129,8 +125,6 @@ class CurvedMirror(OpticalComponent):
     
     Note: For a mirror, the effective focal length is f = R/2,
     so the power is -2/R (negative for concave mirror).
-    
-    Source: ABCD Matrices notes, Eq. 7 (page 3)
     """
     
     def __init__(self, radius: float, name: str = "Curved Mirror"):
@@ -151,8 +145,6 @@ class FlatMirror(OpticalComponent):
     ABCD Matrix:
         M = [[1, 0],
              [0, 1]]
-    
-    Source: General optics formula
     """
     
     def __init__(self, name: str = "Flat Mirror"):
@@ -170,13 +162,13 @@ class BeamSplitter:
     50:50 beam splitter for quantum optics.
     
     Math: Unitary transformation matrix
-        Û_BS = (1/√2) [[1,  1],
-                       [1, -1]]
+        U = (1/√2) [[1,  1],
+                    [1, -1]]
     
     Physical meaning:
     - Input photon in path 0 → equal superposition (|0⟩ + |1⟩)/√2
     - Input photon in path 1 → equal superposition (|0⟩ - |1⟩)/√2
-    - Relative π phase shift on one path (sign difference)
+    - Relative pi phase shift on one path (sign difference)
     
     Example:
     --------
@@ -204,7 +196,7 @@ class BeamSplitter:
         Returns:
         --------
         Qobj
-            2×2 unitary matrix representing beam splitter transformation
+            2x2 unitary matrix representing beam splitter transformation
         """
         data = np.eye(num_paths, dtype=complex)
         data[self.input_a, self.input_a] = 1/np.sqrt(2)
@@ -222,9 +214,7 @@ class DielectricInterface(OpticalComponent):
     
     ABCD Matrix:
         M = [[1,   0],
-             [0, n₁/n₂]]
-    
-    Source: General optics formula
+             [0, eta1/eta2]]
     """
     
     def __init__(self, n1: float, n2: float, name: str = "Interface"):
@@ -256,10 +246,8 @@ class PolarizationComponent(OpticalComponent):
         2D rotation matrix.
         
         Math:
-            R(θ) = [[cos(θ), -sin(θ)],
-                    [sin(θ),  cos(θ)]]
-        
-        Source: Polarization notes, Eq. 11 (page 5)
+            R(theta) = [[cos, -sin],
+                        [sin,  cos]]
         """
         c, s = np.cos(angle), np.sin(angle)
         return np.array([[c, -s],
@@ -267,18 +255,16 @@ class PolarizationComponent(OpticalComponent):
 
 class Polarizer(PolarizationComponent):
     """
-    Linear polarizer at angle θ from horizontal.
+    Linear polarizer at angle theta from horizontal.
     
     Jones Matrix (horizontal polarizer):
         Th = [[1, 0],
-               [0, 0]]
+              [0, 0]]
     
-    Rotated by angle θ:
-        T(θ) = R(θ) · Th · R(-θ)
+    Rotated by angle theta:
+        T(theta) = R(theta) · Th · R(-theta)
     
-    where R(θ) is the rotation matrix.
-    
-    Source: Polarization notes, Eq. 8, 12 (pages 4-5)
+    where R(theta) is the rotation matrix.
     """
     
     def __init__(self, angle: float = 0.0, name: str = "Polarizer"):
@@ -301,7 +287,7 @@ class Polarizer(PolarizationComponent):
     
     def __repr__(self):
         angle_deg = np.rad2deg(self.angle)
-        return f"Polarizer(θ={angle_deg:.1f}°)"
+        return f"Polarizer($\\theta={angle_deg:.1f}^\\circ$)"
 
 class RetroReflectiveMirror(PolarizationComponent):
     """
@@ -329,19 +315,17 @@ class RetroReflectiveMirror(PolarizationComponent):
 
 class HalfWavePlate(PolarizationComponent):
     """
-    Half-wave plate (HWP) with fast axis at angle θ.
+    Half-wave plate (HWP) with fast axis at angle theta.
     
-    A HWP introduces a phase shift of π between fast and slow axes.
-    It rotates linear polarization by 2θ.
+    A HWP introduces a phase shift of pi between fast and slow axes.
+    It rotates linear polarization by 2theta.
     
     Jones Matrix (fast axis horizontal):
         ThWP = [[1,  0],
                  [0, -1]]
     
-    Rotated by angle θ:
-        T(θ) = R(θ) · ThWP · R(-θ)
-    
-    Source: Polarization notes, Eq. 37 (page 15)
+    Rotated by angle theta:
+        T(theta) = R(theta) · ThWP · R(-theta)
     """
     
     def __init__(self, fast_axis_angle: float = 0.0, name: str = "HWP", retardance_deviation: float = 0.0):
@@ -366,23 +350,21 @@ class HalfWavePlate(PolarizationComponent):
     
     def __repr__(self):
         angle_deg = np.rad2deg(self.angle)
-        return f"HWP(θ={angle_deg:.1f}°, δ={self.retardance_deviation:.2f} rad)"
+        return f"HWP($\\theta={angle_deg:.1f}^\\circ, \\delta={self.retardance_deviation:.2f}$ rad)"
 
 class QuarterWavePlate(PolarizationComponent):
     """
-    Quarter-wave plate (QWP) with fast axis at angle θ.
+    Quarter-wave plate (QWP) with fast axis at angle theta.
     
-    A QWP introduces a phase shift of π/2 between fast and slow axes.
-    At θ = 45°, it converts linear → circular polarization.
+    A QWP introduces a phase shift of pi/2 between fast and slow axes.
+    At theta = 45 deg, it converts linear to circular polarization.
     
     Jones Matrix (fast axis horizontal):
         T_QWP = [[1,  0],
                  [0, -i]]
     
-    Rotated by angle θ:
-        T(θ) = R(θ) · T_QWP · R(-θ)
-    
-    Source: Polarization notes, Eq. 42 (page 17)
+    Rotated by angle theta:
+        T(theta) = R(theta) · T_QWP · R(-theta)
     """
     
     def __init__(self, fast_axis_angle: float = 0.0, name: str = "QWP", retardance_deviation: float = 0.0):
@@ -407,23 +389,21 @@ class QuarterWavePlate(PolarizationComponent):
     
     def __repr__(self):
         angle_deg = np.rad2deg(self.angle)
-        return f"QWP(θ={angle_deg:.1f}°, δ={self.retardance_deviation:.2f} rad)"
+        return f"QWP($\\theta={angle_deg:.1f}^\\circ, \\delta={self.retardance_deviation:.2f}$ rad)"
 
 class PolarizingBeamSplitter(PolarizationComponent):
     """
-    Polarizing Beam Splitter compatible with your OpticalCircuit framework.
+    Polarizing Beam Splitter.
     
     Jones Matrix for transmitted (H) port: [[1, 0], [0, 0]]
-    Jones Matrix for reflected (V) port: [[0, 0], [0, 1]]
     
-    Source: Polarization Notes, Section 1.2 (pages 3-4)
+    Jones Matrix for reflected (V) port: [[0, 0], [0, 1]]
     """
     
     def __init__(self, port: str = 'transmitted', name: str = "PBS"):
         super().__init__(name)
         self.port = port.lower()
         
-        # Define Jones matrices for each port
         if self.port in ['transmitted', 'horizontal', 'h', 't']:
             self.jones_matrix = np.array([[1.0, 0.0],
                                           [0.0, 0.0]], dtype=complex)

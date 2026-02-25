@@ -2,6 +2,7 @@ import numpy as np
 from sympy import nsimplify, latex, simplify, Rational, I, sqrt, gcd, lcm, factor
 from sympy import Matrix as SMatrix
 import sympy
+from fractions import Fraction
 
 from qutip import *
 from qutip import Qobj
@@ -76,9 +77,76 @@ def niceprint(s, header_size=0, method: Literal['Markdown', 'Latex']='Markdown')
             # auto-wrap so plain text + math both render cleanly
             display(Latex(f"\\begin{{equation*}}{s}\\end{{equation*}}"))
 
+
+
+def _value_to_latex(v: float, tolerance: float = 1e-6, max_denom: int = 100) -> str:
+    """
+    Convert a real float to its most compact LaTeX representation.
+
+    Priority order:
+      1. Exact integer
+      2. Simple fraction  p/q  with |q| <= max_denom
+         Uses Python's Fraction.limit_denominator for exact rational arithmetic —
+         no sympy guessing required.
+      3. Square-root form — work in "squared space" (analogous to log-space × 2):
+         If v^2 is a nice rational with |q| <= max_denom, then v = ±sqrt(p/q).
+         Sympy then simplifies/rationalizes: e.g. sqrt(1/2) → 1/√2, sqrt(3)/3, etc.
+         This handles 1/√2, 1/√3, √(2/5), 2/√3, √5/4 ... all automatically,
+         replacing every old hardcoded case.
+      4. Decimal fallback  (:.6g — compact, strips trailing zeros, sci-notation
+         for extreme values). No ugly large integers in the output.
+
+    Parameters
+    ----------
+    v         : real float to format (pass real and imaginary parts separately)
+    tolerance : closeness threshold
+    max_denom : maximum denominator for rational / sqrt-rational checks (default 100)
+    """
+    if abs(v) < tolerance:
+        return "0"
+
+    sign = -1 if v < 0 else 1
+    abs_v = abs(v)
+
+    # 1. Integer
+    if abs(abs_v - round(abs_v)) < tolerance:
+        return str(int(round(v)))
+
+    # 2. Simple fraction
+    frac = Fraction(abs_v).limit_denominator(max_denom)
+    if abs(float(frac) - abs_v) < tolerance:
+        signed_num = sign * frac.numerator
+        if frac.denominator == 1:
+            return str(signed_num)
+        return rf"\frac{{{signed_num}}}{{{frac.denominator}}}"
+
+    # 3. Square-root form: if v^2 is rational, v = ±sqrt(p/q)
+    v2 = abs_v * abs_v
+    frac2 = Fraction(v2).limit_denominator(max_denom)
+    if abs(float(frac2) - v2) < tolerance and frac2 > 0:
+        sym = sympy.sqrt(sympy.Rational(frac2.numerator, frac2.denominator))
+        sym = sympy.simplify(sym)
+        if sign == -1:
+            sym = -sym
+        return latex(sym)
+
+    # 4. Decimal fallback
+    return f"{v:.6g}"
+
+
 # display nicely
-def cleandisp(qobj, format: Literal['Dirac']=None, return_str: Literal['Markdown', 'Latex']=None, tolerance=1e-6, precision=12, preserve_original=False):
-    """Formats a QuTiP object for better display with correct LaTeX formatting."""
+def cleandisp(qobj, format: Literal['Dirac']=None, return_str: Literal['Markdown', 'Latex']=None,
+              tolerance=1e-6, precision=12, preserve_original=False, max_denom=100):
+    """
+    Formats a QuTiP object (or plain numpy array/scalar) for clean LaTeX display.
+
+    Parameters
+    ----------
+    max_denom : int
+        Maximum denominator considered for rational / sqrt-rational simplification.
+        Coefficients that don't reduce within this bound fall back to decimals.
+        Default 100.
+    """
     
     arr = qobj.full() if isinstance(qobj, Qobj) else np.array(qobj)
     original_shape = arr.shape
@@ -89,40 +157,21 @@ def cleandisp(qobj, format: Literal['Dirac']=None, return_str: Literal['Markdown
         val = complex(arr)
         val = round(val.real, precision) + 1j * round(val.imag, precision)
         
-        def _scalar_to_latex(v, tolerance):
-            if abs(v - 1/np.sqrt(2)) < tolerance:
-                return r"\frac{1}{\sqrt{2}}"
-            elif abs(v + 1/np.sqrt(2)) < tolerance:
-                return r"-\frac{1}{\sqrt{2}}"
-            elif abs(v - 1/np.sqrt(3)) < tolerance:
-                return r"\frac{1}{\sqrt{3}}"
-            elif abs(v + 1/np.sqrt(3)) < tolerance:
-                return r"-\frac{1}{\sqrt{3}}"
-            else:
-                sym = simplify(nsimplify(v, rational=False, tolerance=tolerance))
-                sym_str = latex(sym)
-                # if sympy found something ugly, fall back to decimal
-                if any(str(n).isdigit() and len(str(n)) > 4 
-                    for n in sympy.preorder_traversal(sym) 
-                    if isinstance(n, sympy.Integer)):
-                    return latex(sympy.Float(round(v, 6)))
-                return sym_str
-        
         re, im = val.real, val.imag
         
         if abs(im) < tolerance:                      # purely real
-            sym_str = _scalar_to_latex(re, tolerance)
-        elif abs(re) < tolerance:                     # purely imaginary
-            coeff = _scalar_to_latex(im, tolerance)
+            sym_str = _value_to_latex(re, tolerance, max_denom)
+        elif abs(re) < tolerance:                    # purely imaginary
+            coeff = _value_to_latex(im, tolerance, max_denom)
             if coeff == '1':
                 sym_str = r"i"
             elif coeff == '-1':
                 sym_str = r"-i"
             else:
                 sym_str = coeff + r" i"
-        else:                                         # genuinely complex
-            re_str = _scalar_to_latex(re, tolerance)
-            im_str = _scalar_to_latex(im, tolerance)
+        else:                                        # genuinely complex
+            re_str = _value_to_latex(re, tolerance, max_denom)
+            im_str = _value_to_latex(im, tolerance, max_denom)
             if im_str.startswith('-'):
                 sym_str = f"{re_str} - {im_str[1:]} i"
             else:
@@ -143,7 +192,7 @@ def cleandisp(qobj, format: Literal['Dirac']=None, return_str: Literal['Markdown
                       (isinstance(qobj, Qobj) and qobj.type == 'ket')
     
     if format == 'Dirac' and is_state_vector:
-        string = _state_to_dirac(arr, tolerance, precision, preserve_original)
+        string = _state_to_dirac(arr, tolerance, precision, preserve_original, max_denom)
         latex_str = f"\\begin{{equation*}}{string}\\end{{equation*}}"
         if return_str == 'Latex':
             return string          # just the inner LaTeX, no wrapper
@@ -155,7 +204,7 @@ def cleandisp(qobj, format: Literal['Dirac']=None, return_str: Literal['Markdown
     scalar_str = ""
     if not preserve_original:
         # find nonzero common factor (smallest absolute value)
-        non_zero_mask = np.abs(arr) > tolerance # filter out numerical noise within tolerance
+        non_zero_mask = np.abs(arr) > tolerance
         components = np.concatenate([
             np.abs(arr.real[non_zero_mask]),
             np.abs(arr.imag[non_zero_mask])
@@ -176,11 +225,8 @@ def cleandisp(qobj, format: Literal['Dirac']=None, return_str: Literal['Markdown
                     all_entries.append(im_part)
             
             # Find the rational prefactor: GCD of all rational coefficients
-            # by expressing each entry as coeff * irrational_part
-            # Strategy: find the smallest rational number that divides all entries
             rational_coeffs = []
             for e in all_entries:
-                # e.as_coeff_Mul() splits into (rational_coeff, rest)
                 coeff, _ = e.as_coeff_Mul()
                 if coeff != 0:
                     rational_coeffs.append(abs(coeff))
@@ -190,18 +236,21 @@ def cleandisp(qobj, format: Literal['Dirac']=None, return_str: Literal['Markdown
                 sym_factor = reduce(lambda a, b: sympy.gcd(a, b), rational_coeffs)
                 
                 if sym_factor != 1 and sym_factor != 0:
-                    factor_simplified = simplify(sym_factor)
+                    factor_val = float(sym_factor)
                     scaled_sym = sym_arr / sym_factor
-                    
-                    # Only use this factoring if it actually simplifies the entries
-                    if sym_factor != 1:
-                        if abs(float(sym_factor) - 1/np.sqrt(2)) < tolerance:
-                            scalar_str = r"\frac{1}{\sqrt{2}}"
-                        elif abs(float(sym_factor) - 1/np.sqrt(3)) < tolerance:
-                            scalar_str = r"\frac{1}{\sqrt{3}}"
-                        else:
-                            scalar_str = latex(factor_simplified)
-                        
+
+                    # Use _value_to_latex for a clean, consistent factor string
+                    candidate = _value_to_latex(factor_val, tolerance, max_denom)
+
+                    # Only pull out the factor when it produces a genuinely clean prefix
+                    # (skip bare decimals — they add visual noise without clarity)
+                    _looks_clean = (
+                        candidate not in ("1", "0")
+                        and ('\\frac' in candidate or '\\sqrt' in candidate
+                             or candidate.lstrip('-').isdigit())
+                    )
+                    if _looks_clean:
+                        scalar_str = candidate
                         sympy_matrix = scaled_sym
                         matrix_latex = latex(sympy_matrix, mat_delim='(', mat_str='array')
                         latex_str = f"\\begin{{equation*}}{scalar_str}{matrix_latex}\\end{{equation*}}"
@@ -218,7 +267,8 @@ def cleandisp(qobj, format: Literal['Dirac']=None, return_str: Literal['Markdown
 
     return string if return_str is not None else niceprint(latex_str, method='Latex')
 
-def _state_to_dirac(arr, tolerance=1e-6, precision=12, preserve_original=False):
+
+def _state_to_dirac(arr, tolerance=1e-6, precision=12, preserve_original=False, max_denom=100):
     """Convert a state vector to Dirac notation."""
     # Flatten to 1D array
     arr = arr.flatten()
@@ -242,9 +292,10 @@ def _state_to_dirac(arr, tolerance=1e-6, precision=12, preserve_original=False):
         if len(components) > 0:
             min_val = np.min(components)
             factor = nsimplify(min_val, rational=False, tolerance=tolerance)
+            factor_float = float(factor)
             
             # divide by factor and check if components are integers (within tolerance)
-            scaled = arr / float(factor)
+            scaled = arr / factor_float
             scaled_components = np.concatenate([
                 np.abs(scaled.real[non_zero_mask]),
                 np.abs(scaled.imag[non_zero_mask])
@@ -253,18 +304,10 @@ def _state_to_dirac(arr, tolerance=1e-6, precision=12, preserve_original=False):
             
             # check if it scales to integers (within tolerance)
             if np.allclose(scaled_components, np.round(scaled_components), atol=tolerance):
-                factor_simplified = simplify(factor)
-                
-                # manual conversion for some forms
-                if abs(float(factor) - 1/np.sqrt(2)) < tolerance:
-                    scalar_str = r"\frac{1}{\sqrt{2}}"
-                elif abs(float(factor) - 1/np.sqrt(3)) < tolerance:
-                    scalar_str = r"\frac{1}{\sqrt{3}}"
-                elif abs(float(factor) - 1/2) < tolerance:
-                    scalar_str = r"\frac{1}{2}"
-                elif factor_simplified != 1:
-                    scalar_str = latex(factor_simplified)
-                
+                # Use _value_to_latex uniformly — handles fractions, sqrt, decimals
+                candidate = _value_to_latex(factor_float, tolerance, max_denom)
+                if candidate not in ("1", "0"):
+                    scalar_str = candidate
                 arr = scaled
     
     # Build Dirac notation
@@ -277,21 +320,22 @@ def _state_to_dirac(arr, tolerance=1e-6, precision=12, preserve_original=False):
         binary = format(i, f'0{n_qubits}b')
         ket = '|' + binary + '\\rangle'
         
-        # Simplify amplitude
-        amp_simplified = nsimplify(amplitude, rational=False, tolerance=tolerance)
-        
-        # Format coefficient
-        if abs(amp_simplified - 1) < tolerance:
-            coeff = ""
-        elif abs(amp_simplified + 1) < tolerance:
-            coeff = "-"
+        # Format the amplitude with _value_to_latex on real/imag parts
+        re, im = amplitude.real, amplitude.imag
+        if abs(im) < tolerance:
+            coeff = _value_to_latex(re, tolerance, max_denom)
+        elif abs(re) < tolerance:
+            c = _value_to_latex(im, tolerance, max_denom)
+            coeff = "i" if c == "1" else ("-i" if c == "-1" else f"{c} i")
         else:
-            coeff = latex(amp_simplified)
+            re_s = _value_to_latex(re, tolerance, max_denom)
+            im_s = _value_to_latex(im, tolerance, max_denom)
+            coeff = f"{re_s} - {im_s[1:]} i" if im_s.startswith('-') else f"{re_s} + {im_s} i"
         
         # Combine coefficient and ket
-        if coeff == "":
+        if coeff == "1":
             terms.append(ket)
-        elif coeff == "-":
+        elif coeff == "-1":
             terms.append(f"-{ket}")
         else:
             terms.append(f"{coeff}{ket}")
@@ -310,3 +354,7 @@ def _state_to_dirac(arr, tolerance=1e-6, precision=12, preserve_original=False):
         return f"{scalar_str}\\left({dirac_str}\\right)"
     else:
         return dirac_str
+
+
+
+

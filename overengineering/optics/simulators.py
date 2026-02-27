@@ -155,7 +155,7 @@ class PhaseShifter:
     bs = BeamSplitter()
     state = state.apply_operator(bs.get_quantum_operator())
     
-    # Add π/2 phase shift to path 1
+    # Add pi/2 phase shift to path 1
     ps = PhaseShifter(path_index=1, phase=np.pi/2)
     state = state.apply_operator(ps.get_quantum_operator())
     """
@@ -179,14 +179,14 @@ class PhaseShifter:
         Returns:
         --------
         Qobj
-            Diagonal matrix with e^(iφ) on specified path
+            Diagonal matrix with e^(i  phi) on specified path
         """
         data = np.eye(num_paths, dtype=complex)
         data[self.path_index, self.path_index] = np.exp(1j * self.phase)
         return Qobj(data)
     
     def __repr__(self):
-        return f"PhaseShifter(path={self.path_index}, φ={self.phase:.3f}rad)"
+        return f"PhaseShifter(path={self.path_index}, $\\phi={self.phase:.3f}$ rad)"
 
 class OpticalCircuit:
     """
@@ -221,9 +221,7 @@ class OpticalCircuit:
         self.intensity_out = 0.0
         self.transmission = 0.0
     
-    # ───────────────────────────────────────────────────────────────────────────
-    # Components
-    # ───────────────────────────────────────────────────────────────────────────
+    # Components ────────────────────────────────────────────────────────────
     
     def add_component(self, component: OpticalComponent):
         """Add a custom component to the circuit."""
@@ -281,9 +279,7 @@ class OpticalCircuit:
         self.components.append(PolarizingBeamSplitter(port=port))
         return self
     
-    # ───────────────────────────────────────────────────────────────────────────
-    # Analysis Methods
-    # ───────────────────────────────────────────────────────────────────────────
+    # Analysis Methods ───────────────────────────────────────────────────────
     
     def get_total_abcd_matrix(self) -> np.ndarray:
         """
@@ -327,13 +323,7 @@ class OpticalCircuit:
     def propagate_polarization(self, state_in: np.ndarray, 
                               return_all_states: bool = False):
         """
-        Propagate a polarization state through the circuit.
-        
-        Automatically handles retroreflective mirrors:
-        - Components before mirror: forward propagation
-        - Mirror: complex conjugation
-        - Components before mirror: backward propagation (SKIPPING POLARIZERS)
-        - Components after mirror: forward propagation
+        Propagate a polarization state through the circuit. Automatically handles retroreflective mirrors.
         
         Args:
             state_in: Input Jones vector (2D complex array)
@@ -483,7 +473,7 @@ class MachZehnderInterferometer:
     print(f"P0 = {P0:.3f}, P1 = {P1:.3f}")
     P0 = 1.000, P1 = 0.000
     
-    # Destructive interference (π phase shift)
+    # Destructive interference (pi phase shift)
     mz = MachZehnderInterferometer(delta_L=316.4e-9, wavelength=632.8e-9)
     P0, P1 = mz.get_output_probabilities()
     print(f"P0 = {P0:.3f}, P1 = {P1:.3f}")
@@ -589,7 +579,7 @@ class MachZehnderInterferometer:
     
     def __repr__(self):
         return (f"MachZehnderInterferometer(ΔL={self.delta_L*1e9:.1f}nm, "
-                f"λ={self.wavelength*1e9:.1f}nm, φ={self.delta_phi:.3f}rad)")
+                f"$\\lambda = {self.wavelength*1e9:.1f}$nm, $\\phi = {self.delta_phi:.3f}$ rad)")
 
 
 
@@ -628,11 +618,6 @@ class FiberCoupler:
     def numerical_aperture(self, ncore: float, ncladding: float) -> float:
         """
         Calculate fiber numerical aperture.
-        
-        Math:
-            NA = √(ncore² - ncladding²)
-        
-        Source: Fiber Optics notes, page 3
         """
         return np.sqrt(ncore**2 - ncladding**2)
 
@@ -642,13 +627,13 @@ class FiberOutcoupledBeamSimulator:
 
     Parameters
     ----------
-    wavelength      : float  – laser wavelength [m]
-    w_laser         : float  – laser beam waist radius before fiber [m]
-    w_fiber_sm      : float  – SM fiber mode-field radius (MFD/2) [m]
-    w_fiber_mm      : float  – MM fiber coupling target radius (≈0.75·r_core) [m]
-    eta_theoretical : float  – mode-overlap η from FiberModeMatchOptimizer (0→1)
-    P_in            : float  – input laser power [W]
-    fiber_type      : str    – 'SM' or 'MM' (controls Q3 polarization model)
+    wavelength      : float - laser wavelength [m]
+    w_laser         : float - laser beam waist radius before fiber [m]
+    w_fiber_sm      : float - SM fiber mode-field radius (MFD/2) [m]
+    w_fiber_mm      : float - MM fiber coupling target radius (~0.75·r_core) [m]
+    eta_theoretical : float - mode-overlap eta from FiberModeMatchOptimizer (0→1)
+    P_in            : float - input laser power [W]
+    fiber_type      : str - 'SM' or 'MM' (controls Q3 polarization model)
     """
 
     def __init__(
@@ -899,18 +884,18 @@ class FiberOutcoupledBeamSimulator:
                        color='salmon', alpha=0.25, label='Shaking')
 
         ax2.plot(t, theta % np.pi, color='#55a868', linewidth=1.0,
-                 label='Fiber fast-axis θ (mod π)')
+                 label='Fiber fast-axis θ (mod pi)')
         ax2.plot(t, delta % (2*np.pi) / (2*np.pi), color='#8172b2', linewidth=1.0,
-                 linestyle='-.', label='Fiber retardance δ / 2π')
+                 linestyle='-.', label='Fiber retardance $\\delta / 2\\pi$')
         ax2.set_xlabel('Time (s)', fontsize=11)
         ax2.set_ylabel('Fiber birefringence params.', fontsize=11)
         ax2.legend(fontsize=9)
         ax2.grid(True, alpha=0.3)
 
         # Annotation arrows
-        ax1.annotate('Air blast\n(thermal Δn)', xy=(air_event + event_duration/2, 0.05),
+        ax1.annotate('Air blast\n(thermal $\\Delta n$)', xy=(air_event + event_duration/2, 0.05),
                      fontsize=8, ha='center', color='steelblue', fontweight='bold')
-        ax1.annotate('Shaking\n(stress Δn)', xy=(shake_event + event_duration/2, 0.05),
+        ax1.annotate('Shaking\n(stress $\\Delta n$)', xy=(shake_event + event_duration/2, 0.05),
                      fontsize=8, ha='center', color='crimson', fontweight='bold')
 
         fig.suptitle(f'PBS Power vs. Time with Perturbations ({self.fiber_type} fiber)',fontsize=11, fontweight='bold')
@@ -920,11 +905,6 @@ class FiberOutcoupledBeamSimulator:
 class BowTieCavity:
     """
     Bow-tie cavity with automatic geometry calculations.
-    
-    This class handles the geometry of a bow-tie cavity where:
-    - Two flat mirrors are separated by W (width)
-    - Two curved mirrors are separated by diagonal distance
-    - Height H determines the bow-tie shape
     """
     
     def __init__(self, geometry: CavityGeometry):
@@ -953,6 +933,7 @@ class BowTieCavity:
     
     def _build_roundtrip(self):
         """
+        Internal.
         Build round-trip ABCD matrix and find the cavity eigenmode q at the input mirror.
         All quantities in SI meters.
         """
@@ -1062,9 +1043,6 @@ class BowTieCavity:
 class CavityTransmissionSimulator:
     """
     Simulates cavity transmission signal as piezo scans cavity length.
-    
-    Models the voltage output from a photodetector as the cavity is scanned
-    through resonances using a piezo on one mirror.
     """
     
     def __init__(self, cavity: BowTieCavity, 
@@ -1097,7 +1075,9 @@ class CavityTransmissionSimulator:
         self._calculate_transmission_parameters()
     
     def _calculate_transmission_parameters(self):
-        """Calculate cavity transmission parameters"""
+        """
+        Internal. Calculate cavity transmission parameters.
+        """
         # Get mirror reflectivities
         R = self.cavity.geometry.R_mirrors
         
@@ -1190,7 +1170,7 @@ class CavityTransmissionSimulator:
             width=0.5
         ) + self.piezo.offset_voltage
         
-        # Convert to displacement: nm/V * V = nm, then nm → m
+        # Convert to displacement: nm/V * V = nm, then nm to m
         displacement_nm = self.piezo.displacement_per_volt * voltage
         displacement_m = displacement_nm * 1e-9
         
@@ -1424,7 +1404,7 @@ class SPDCSimulator:
 
     def mA_to_W(self, I_mA: np.ndarray) -> np.ndarray:
         """
-        Laser diode current [mA] → estimated pump power [W].
+        Laser diode current [mA] --> estimated pump power [W].
         Linear above threshold, zero below.
         """
         I = np.asarray(I_mA, dtype=float)
@@ -1454,7 +1434,7 @@ class SPDCSimulator:
         ----------
         fast_axis  : HWP fast-axis angles in arm 2 [degrees]
         R_max      : peak coincidence rate [counts/s]
-        V : fringe visibility V ∈ [0, 1]
+        V : fringe visibility V in [0, 1]
         phi        : Bell state relative phase [radians]
 
         Returns
@@ -1593,56 +1573,59 @@ class SPDCSimulator:
         ax.grid(True, alpha=0.3)
         return ax
 
+
+
 class PhotonBeamSimulator:
     """
-    Simulates a photon beam as a Poisson-sampled time-binned stream.
-
-    Each element holds the number of photons counted in one raw time bin
-    of width dt_raw, drawn from Poisson(mu = flux * dt_raw).
-
-    Keep dt_raw << 1/flux so that mu << 1.  Longer effective
-    integration times are obtained with boxcar(), which sums n_avg adjacent
-    bins to mimic i.e. the quED's 30 ns coincidence window.
+    Photon beam simulated as a Poisson-sampled time-binned stream.
     """
 
-    def __init__(self, flux: float, dt_raw: float = 1e-9):
+    def __init__(
+        self,
+        flux: float,
+        dt_raw: float = None,
+        mu_target: float = 0.01,
+    ):
         """
         Parameters
         ----------
-        flux   : average photon flux [photons/s]
-        dt_raw : raw time-bin width [s]  (keep flux * dt_raw << 1)
+        flux      : average photon flux [photons/s]
+        dt_raw    : raw time-bin width [s].  If None (default), chosen
+                    automatically so that mu = flux * dt_raw = mu_target.
+        mu_target : target mean photons per raw bin when dt_raw is auto-set.
+                    Keep << 1 to stay in the Poisson regime.  Default 0.01.
         """
-        self.flux   = flux
-        self.dt_raw = dt_raw
-        self.mu_raw = flux * dt_raw
+        self.flux      = flux
+        self.mu_target = mu_target
+        if dt_raw is None:
+            # choose dt_raw so mu = mu_target, guaranteeing mu << 1
+            self.dt_raw = mu_target / flux if flux > 0 else 1e-6
+        else:
+            self.dt_raw = dt_raw
+        self.mu_raw = flux * self.dt_raw
 
     @classmethod
     def from_spdc(
         cls,
         simulator: 'SPDCSimulator',
         P_pump: float = None,
-        dt_raw: float = 1e-9,
+        dt_raw: float = None,
+        mu_target: float = 0.01,
     ) -> 'PhotonBeamSimulator':
         """
-        Create a PhotonBeamSimulator from one detection arm of an SPDCSimulator.
-
-        Single-arm detected flux:
-            flux = pair_rate(P_pump) * eta_1
-
-        Uses SPDCSimulator.pair_rate() and SPDC.eta_1 directly.
+        Initialize simulator from an arm of SPDC simulator.
 
         Parameters
         ----------
         simulator : SPDCSimulator instance
         P_pump    : pump power [W]  (defaults to simulator.p.P_max)
-        dt_raw    : raw time-bin width [s]
+        dt_raw    : raw bin width [s].  If None, auto-selected from flux.
+        mu_target : target mean photons per raw bin (default 0.01)
         """
         if P_pump is None:
             P_pump = simulator.p.P_max
         flux = simulator.pair_rate(P_pump) * simulator.p.eta_1
-        return cls(flux=flux, dt_raw=dt_raw)
-
-    # ── beam generation ───────────────────────────────────────────────────────
+        return cls(flux=flux, dt_raw=dt_raw, mu_target=mu_target)
 
     def generate(self, T_run: float) -> np.ndarray:
         """
@@ -1663,8 +1646,6 @@ class PhotonBeamSimulator:
         """
         Coarsen raw bins by summing n_avg consecutive bins.
 
-        Simulates an effective integration time dt_eff = n_avg * dt_raw.
-
         Parameters
         ----------
         raw_counts : 1-D int array from generate()
@@ -1673,14 +1654,21 @@ class PhotonBeamSimulator:
         n = (len(raw_counts) // n_avg) * n_avg
         return raw_counts[:n].reshape(-1, n_avg).sum(axis=1)
 
-    # ── HBT beamsplitter ──────────────────────────────────────────────────────
+    def boxcar_to_window(self, raw_counts: np.ndarray, t_window: float) -> np.ndarray:
+        """
+        Coarsen raw bins to match a given time window.
 
-    def HBT_BS(self, raw_counts: np.ndarray) -> tuple:
+        Parameters
+        ----------
+        raw_counts : 1-D int array from generate()
+        t_window   : target bin width [s]  (e.g. 30e-9 for quED coincidence window)
+        """
+        n_avg = max(1, round(t_window / self.dt_raw))
+        return self.boxcar(raw_counts, n_avg)
+
+    def hbt_split(self, raw_counts: np.ndarray) -> tuple:
         """
         Simulate a 50:50 beamsplitter acting on the photon stream.
-
-        Each photon independently goes to Arm 1 or Arm 2 with probability
-        1/2, drawn as Binomial(k, 0.5) per bin where k is the bin count.
 
         Returns
         -------
@@ -1690,41 +1678,46 @@ class PhotonBeamSimulator:
         arm2 = raw_counts - arm1
         return arm1, arm2
 
-    # ── g^(2)(0) ─────────────────────────────────────────────────────────────
+    def _g2_batch(self, n_bins: int, n_trials: int) -> np.ndarray:
+        """
+        Internal. Engine for simulating g^(2)(0) over many trials.
+
+        Parameters
+        ----------
+        n_bins   : number of time bins per trial
+        n_trials : number of independent trials
+
+        Returns
+        -------
+        g2 : float array of shape (n_trials,), NaN where N_1 or N_2 == 0
+        """
+        mu = self.mu_raw
+
+        N_total = np.random.poisson(n_bins * mu,       size=n_trials)
+        N1      = np.random.binomial(N_total, 0.5)
+        N2      = N_total - N1
+
+        K   = np.random.poisson(n_bins * mu**2 / 2,   size=n_trials)
+        N12 = np.random.binomial(K, 0.5)
+
+        valid  = (N1 > 0) & (N2 > 0)
+        g2     = np.full(n_trials, np.nan)
+        g2[valid] = (N12[valid] * n_bins) / (N1[valid] * N2[valid])
+        return g2
 
     def g2_zero(self, T_run: float) -> float:
         """
         Simulate one measurement of g^(2)(0).
 
-        Derived from quED-HBT manual Eq. (2.4) re-written in bin counts:
-
-            g^(2)(0) = R_12 / (R_1 * R_2 * t_c)
-                     = (N_12 * n_bins) / (N_1 * N_2)
-
-        where N_1, N_2 = total counts per arm,
-              N_12 = bins where both arms have >= 1 count,
-              n_bins = T_run / dt_raw.
-
         Parameters
         ----------
         T_run : run duration [s]
         """
-        counts     = self.generate(T_run)
-        arm1, arm2 = self.HBT_BS(counts)
-
-        N1     = int(arm1.sum())
-        N2     = int(arm2.sum())
-        N12    = int(np.sum((arm1 >= 1) & (arm2 >= 1)))
-        n_bins = len(counts)
-
-        if N1 == 0 or N2 == 0:
-            return np.nan
-
-        return (N12 * n_bins) / (N1 * N2)
+        return float(self._g2_batch(int(T_run / self.dt_raw), 1)[0])
 
     def g2_distribution(self, T_run: float, n_trials: int = 500) -> dict:
         """
-        Run g^(2)(0) n_trials times and collect statistics.
+        Draw g^(2)(0) for n_trials independent runs.
 
         Parameters
         ----------
@@ -1735,7 +1728,7 @@ class PhotonBeamSimulator:
         -------
         dict with keys 'g2_values', 'mean', 'std'
         """
-        g2_vals = np.array([self.g2_zero(T_run) for _ in range(n_trials)])
+        g2_vals = self._g2_batch(int(T_run / self.dt_raw), n_trials)
         g2_vals = g2_vals[~np.isnan(g2_vals)]
         return {
             'g2_values': g2_vals,
@@ -1749,7 +1742,9 @@ class PhotonBeamSimulator:
         n_trials: int = 500,
         ax: Optional[plt.Axes] = None,
     ) -> plt.Axes:
-        """Histogram of g^(2)(0) values over many simulated runs."""
+        """
+        Histogram of g^(2)(0) values over many simulated runs.
+        """
         result    = self.g2_distribution(T_run, n_trials)
         g2_vals   = result['g2_values']
         mu, sigma = result['mean'], result['std']
@@ -1766,14 +1761,13 @@ class PhotonBeamSimulator:
         ax.set_ylabel('Counts')
         ax.set_title(
             f'Distribution of $g^{{(2)}}(0)$ over {n_trials} trials\n'
-            f'Flux = {self.flux:.2e} ph/s,  $T_{{\\rm run}}$ = {T_run:.2f} s\n'
+            f'Flux = {self.flux:.2e} ph/s,  $\\mu$ = {self.mu_raw:.4f},  '
+            f'$T_{{\\rm run}}$ = {T_run:.2f} s\n'
             f'Mean = {mu:.4f},  Std = {sigma:.4f}'
         )
         ax.legend()
         ax.grid(True, alpha=0.3)
         return ax
-
-    # ── heralded g^(2)_H(0) — Lab Section 3 step 2 ──────────────────────────
 
     def heralded_g2_zero(
         self,
@@ -1783,18 +1777,6 @@ class PhotonBeamSimulator:
     ) -> float:
         """
         Simulate the heralded g^(2)_H(0) measurement.
-
-        Uses SPDCSimulator.pair_rate() and SPDC.eta_1 for the correlated
-        pair flux in the herald arm, consistent with from_spdc().
-
-        Heralded formula (qutools g2-HBT handout, Eq. 16):
-
-            g^(2)_H(0) = (N_123 * N_1) / (N_12 * N_13)
-
-        Channel 0 = herald (quED arm 1, detected with eta_1),
-        channels 1 & 2 = HBT outputs of the other arm.
-        Triple coincidences N_123 arise only from multi-pair events;
-        for a good single-photon source N_123 -> 0 so g^(2)_H -> 0.
 
         Parameters
         ----------
@@ -1809,36 +1791,313 @@ class PhotonBeamSimulator:
         mu_pair = simulator.pair_rate(P_pump) * self.dt_raw
         eta_h   = simulator.p.eta_1
 
-        pairs = np.random.poisson(mu_pair, size=n_bins)
+        # sparse correlated pair events ---
+        N_pairs = int(np.random.poisson(n_bins * mu_pair))
+        if N_pairs == 0:
+            return np.nan
 
-        # herald arm: detect each photon with efficiency eta_h
-        ch0 = np.random.binomial(pairs, eta_h)
+        pair_bins = np.random.randint(0, n_bins, size=N_pairs)
 
-        # signal arm: 50:50 HBT split
-        ch1 = np.random.binomial(pairs, 0.5)
-        ch2 = pairs - ch1
+        # herald --> each pair fires channel 0 with probability eta_h
+        herald_mask = np.random.rand(N_pairs) < eta_h
 
-        # add uncorrelated background from this beam's own flux
-        bg       = self.generate(T_run)
-        bg1, bg2 = self.HBT_BS(bg)
-        ch1 += bg1
-        ch2 += bg2
+        # signal arm: 50:50 HBT split of the same pairs
+        ch1_mask = np.random.rand(N_pairs) < 0.5 # (true=ch1, false=ch2)
 
-        herald = ch0 >= 1
-        N1   = int(herald.sum())
-        N12  = int((herald & (ch1 >= 1)).sum())
-        N13  = int((herald & (ch2 >= 1)).sum())
-        N123 = int((herald & (ch1 >= 1) & (ch2 >= 1)).sum())
+        # sparse uncorrelated background ---
+        N_bg    = int(np.random.poisson(n_bins * self.mu_raw))
+        bg_bins = np.random.randint(0, n_bins, size=N_bg) if N_bg > 0 else np.array([], dtype=int)
+        bg_ch1  = np.random.rand(N_bg) < 0.5
+
+        # occupied bin sets per channel
+        herald_bins = np.unique(pair_bins[herald_mask])
+        ch1_pair    = np.unique(pair_bins[ ch1_mask])
+        ch2_pair    = np.unique(pair_bins[~ch1_mask])
+        ch1_bg      = np.unique(bg_bins[bg_ch1])   if N_bg > 0 else np.array([], dtype=int)
+        ch2_bg      = np.unique(bg_bins[~bg_ch1])  if N_bg > 0 else np.array([], dtype=int)
+        ch1_bins    = np.unique(np.concatenate([ch1_pair, ch1_bg]))
+        ch2_bins    = np.unique(np.concatenate([ch2_pair, ch2_bg]))
+
+        N1   = len(herald_bins)
+        N12  = len(np.intersect1d(herald_bins, ch1_bins, assume_unique=True))
+        N13  = len(np.intersect1d(herald_bins, ch2_bins, assume_unique=True))
+        ch12 = np.intersect1d(ch1_bins, ch2_bins, assume_unique=True)
+        N123 = len(np.intersect1d(herald_bins, ch12, assume_unique=True))
 
         if N12 == 0 or N13 == 0:
             return np.nan
 
         return (N123 * N1) / (N12 * N13)
 
+    def print_summary(self):
+        niceprint(
+            f"**PhotonBeamSimulator** <br>"
+            f"Flux: {self.flux:.3e} ph/s <br>"
+            f"$\\Delta t_{{\\rm raw}}$: {self.dt_raw:.3e} s <br>"
+            f"$\\mu$ per raw bin: {self.mu_raw:.4f} <br>"
+            f"Bins per second: {1/self.dt_raw:.3e}"
+        )
 
 
+class BellInequalitySimulator:
+    """
+    Simulates the CHSH Bell inequality experiment.
+    """
 
+    CHSH_ANGLES = {
+        'singlet': {
+            'alpha': (0.0,        np.pi / 4),
+            'beta':  (-np.pi / 8, 5 * np.pi / 8),
+        },
+        'triplet': {
+            'alpha': (0.0,        np.pi / 4),
+            'beta':  (np.pi / 8, -np.pi / 8),
+        },
+    }
 
+    def __init__(
+        self,
+        simulator: 'SPDCSimulator',
+        state: str = 'singlet',
+        visibility: float = 1.0,
+    ):
+        """
+        Parameters
+        ----------
+        simulator  : SPDCSimulator — provides lambda_spdc, Rcoin_W(), SPDC params
+        state      : 'singlet' for (|HH> - |VV>) / sqrt(2)
+                     'triplet' for (|HH> + |VV>) / sqrt(2)
+        visibility : fringe visibility in [0, 1].
+                     P_obs = V * P_QM + (1 - V) * 1/4  (uniform background)
+        """
+        if state not in ('singlet', 'triplet'):
+            raise ValueError("state must be 'singlet' or 'triplet'")
+        self.sim        = simulator
+        self.state      = state
+        self.visibility = visibility
+        self.angles     = self.CHSH_ANGLES[state]
+        self._lam       = simulator.lambda_spdc
+
+    def _arm_amplitudes(self, angle: float) -> tuple:
+        """
+        Internal. Calculates transmission amplitudes through a polarizer at angle for H and V.
+        
+        Returns
+        -------
+        t_H : complex amplitude for |H> transmitted through polarizer at angle
+        t_V : complex amplitude for |V> transmitted through polarizer at angle
+        """
+        H_in = np.array([1.0, 0.0], dtype=complex)
+        V_in = np.array([0.0, 1.0], dtype=complex)
+
+        circ = OpticalCircuit(wavelength=self._lam)
+        circ.add_polarizer(angle=angle)
+
+        E_out_H = circ.propagate_polarization(H_in)
+        E_out_V = circ.propagate_polarization(V_in)
+
+        H_axis = np.array([np.cos(angle), np.sin(angle)], dtype=complex)
+        t_H = complex(H_axis @ E_out_H)
+        t_V = complex(H_axis @ E_out_V)
+        return t_H, t_V
+
+    def _joint_probs(self, alpha: float, beta: float) -> tuple:
+        """
+        Internal. Compute P_HH, P_HV, P_VH, P_VV.
+        """
+        H_in = np.array([1.0, 0.0], dtype=complex)
+        V_in = np.array([0.0, 1.0], dtype=complex)
+
+        # arm a
+        circ_a  = OpticalCircuit(wavelength=self._lam)
+        circ_a.add_polarizer(angle=alpha)
+        E_aH    = circ_a.propagate_polarization(H_in)
+        E_aV    = circ_a.propagate_polarization(V_in)
+        H_a     = np.array([ np.cos(alpha),  np.sin(alpha)], dtype=complex)
+        V_a     = np.array([-np.sin(alpha),  np.cos(alpha)], dtype=complex)
+        t_aH, t_aV = complex(H_a @ E_aH), complex(H_a @ E_aV)
+        r_aH, r_aV = complex(V_a @ E_aH), complex(V_a @ E_aV)
+
+        # arm b
+        circ_b  = OpticalCircuit(wavelength=self._lam)
+        circ_b.add_polarizer(angle=beta)
+        E_bH    = circ_b.propagate_polarization(H_in)
+        E_bV    = circ_b.propagate_polarization(V_in)
+        H_b     = np.array([ np.cos(beta),  np.sin(beta)], dtype=complex)
+        V_b     = np.array([-np.sin(beta),  np.cos(beta)], dtype=complex)
+        t_bH, t_bV = complex(H_b @ E_bH), complex(H_b @ E_bV)
+        r_bH, r_bV = complex(V_b @ E_bH), complex(V_b @ E_bV)
+
+        sign = -1.0 if self.state == 'singlet' else +1.0
+        s2   = np.sqrt(2.0)
+
+        A_HH = (t_aH * t_bH + sign * t_aV * t_bV) / s2
+        A_HV = (t_aH * r_bH + sign * t_aV * r_bV) / s2
+        A_VH = (r_aH * t_bH + sign * r_aV * t_bV) / s2
+        A_VV = (r_aH * r_bH + sign * r_aV * r_bV) / s2
+
+        P_HH, P_HV = abs(A_HH)**2, abs(A_HV)**2
+        P_VH, P_VV = abs(A_VH)**2, abs(A_VV)**2
+
+        V, bg = self.visibility, 0.25
+        return (
+            V * P_HH + (1 - V) * bg,
+            V * P_HV + (1 - V) * bg,
+            V * P_VH + (1 - V) * bg,
+            V * P_VV + (1 - V) * bg,
+        )
+
+    def sample_counts(
+        self,
+        alpha: float,
+        beta: float,
+        P_pump: float = None,
+        T_acq: float = 15.0,
+    ) -> dict:
+        """
+        Simulate Poisson coincidence counts at one (alpha, beta) setting.
+
+        Parameters
+        ----------
+        alpha, beta : polarizer angles [rad]
+        P_pump      : pump power [W] (defaults to sim.p.P_max)
+        T_acq       : acquisition time per setting [s]
+        """
+        if P_pump is None:
+            P_pump = self.sim.p.P_max
+
+        P_HH, P_HV, P_VH, P_VV = self._joint_probs(alpha, beta)
+        R_coin = float(self.sim.Rcoin_W(np.array([P_pump]))[0])
+        N_mean = R_coin * T_acq
+
+        N_HH = int(np.random.poisson(P_HH * N_mean))
+        N_HV = int(np.random.poisson(P_HV * N_mean))
+        N_VH = int(np.random.poisson(P_VH * N_mean))
+        N_VV = int(np.random.poisson(P_VV * N_mean))
+
+        N_tot = N_HH + N_HV + N_VH + N_VV
+        if N_tot == 0:
+            return dict(N_HH=0, N_HV=0, N_VH=0, N_VV=0,
+                        N_tot=0, E=0.0, sigma_E=np.inf)
+
+        E       = (N_HH - N_HV - N_VH + N_VV) / N_tot
+        sigma_E = 1.0 / np.sqrt(N_tot)
+        return dict(N_HH=N_HH, N_HV=N_HV, N_VH=N_VH, N_VV=N_VV,
+                    N_tot=N_tot, E=E, sigma_E=sigma_E)
+
+    def run_chsh(self, P_pump: float = None, T_acq: float = 15.0) -> dict:
+        """
+        Simulate the full 4-setting CHSH experiment.
+        
+        Returns
+        -------
+        dict with per-setting results, S, sigma_S, S_theory, violates
+        """
+        if P_pump is None:
+            P_pump = self.sim.p.P_max
+
+        a1, a2 = self.angles['alpha']
+        b1, b2 = self.angles['beta']
+
+        chsh_settings = [
+            (a1, b1, +1.0),
+            (a1, b2, +1.0),
+            (a2, b1, +1.0),
+            (a2, b2, -1.0),
+        ]
+
+        results = {}
+        S, var_S = 0.0, 0.0
+
+        for alpha, beta, sign in chsh_settings:
+            key = f'a={np.rad2deg(alpha):.1f}°, b={np.rad2deg(beta):.1f}°'
+            r   = self.sample_counts(alpha, beta, P_pump, T_acq)
+            results[key] = r
+            S     += sign * r['E']
+            var_S += r['sigma_E'] ** 2
+
+        return {
+            'settings':  results,
+            'S':         S,
+            'sigma_S':   np.sqrt(var_S),
+            'S_theory':  self.visibility * 2.0 * np.sqrt(2.0),
+            'violates':  abs(S) > 2.0,
+        }
+
+    def plot_correlation_sweep(
+        self,
+        fixed_alpha: float = 0.0,
+        n_points: int = 73,
+        P_pump: float = None,
+        T_acq: float = 15.0,
+        ax: Optional[plt.Axes] = None,
+    ) -> plt.Axes:
+        """
+        Plot E(alpha, beta) vs. beta with alpha fixed.
+
+        Parameters
+        ----------
+        fixed_alpha : fixed polarizer angle [rad]
+        n_points    : resolution of smooth theory curve
+        P_pump      : pump power [W]
+        T_acq       : acquisition time per simulated data point [s]
+        """
+        if P_pump is None:
+            P_pump = self.sim.p.P_max
+
+        betas_theory = np.linspace(0, 2 * np.pi, n_points)
+        E_theory = np.array([
+            np.dot(self._joint_probs(fixed_alpha, b), [1, -1, -1, 1])
+            for b in betas_theory
+        ])
+
+        betas_data = np.deg2rad(np.arange(0, 361, 5))
+        E_data, E_err = [], []
+        for b in betas_data:
+            r = self.sample_counts(fixed_alpha, b, P_pump, T_acq)
+            E_data.append(r['E'])
+            E_err.append(r['sigma_E'])
+        E_data, E_err = np.array(E_data), np.array(E_err)
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(8, 4))
+
+        ax.plot(np.rad2deg(betas_theory), E_theory,
+                color='steelblue', linewidth=2, label='Theory', zorder=2)
+        ax.errorbar(np.rad2deg(betas_data), E_data, yerr=E_err,
+                    fmt='o', color='crimson', markersize=4,
+                    elinewidth=0.8, capsize=2, label='Simulated data', zorder=3)
+
+        b1, b2 = self.angles['beta']
+        for b, lbl in [(b1, r'$\beta_1$'), (b2, r'$\beta_2$')]:
+            ax.axvline(np.rad2deg(b % (2 * np.pi)),
+                       color='gray', linestyle='--', linewidth=1.2, label=lbl)
+
+        ax.axhline(0, color='k', linewidth=0.5)
+        ax.set_xlabel(r'$\beta$ (degrees)')
+        ax.set_ylabel(r'$E(\alpha,\, \beta)$')
+        ax.set_title(
+            f'Correlation sweep — $|\\psi_{{{self.state[0]}}}\\rangle$,  '
+            f'$\\alpha = {np.rad2deg(fixed_alpha):.1f}^\\circ$,  '
+            f'$V = {self.visibility:.2f}$'
+        )
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        return ax
+
+    def print_chsh_result(self, result: dict):
+        label = 's' if self.state == 'singlet' else 't'
+        niceprint(
+            f"**CHSH Result — $|\\psi_{{{label}}}\\rangle$,  "
+            f"$V = {self.visibility:.2f}$**", 4
+        )
+        niceprint(
+            f"$\\langle S \\rangle = "
+            f"{result['S']:.4f} \\pm {result['sigma_S']:.4f}$ <br>"
+            f"QM prediction: $2\\sqrt{{2}}\\cdot V = {result['S_theory']:.4f}$ <br>"
+            f"Classical bound: $|\\langle S \\rangle| \\leq 2$ <br>"
+            f"Violates Bell inequality: {'**Yes**' if result['violates'] else 'No'}"
+        )
 
 
 

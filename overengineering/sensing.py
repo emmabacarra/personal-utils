@@ -4,15 +4,13 @@ import numpy as np
 from qutip import *
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-from qutip.qip.circuit import QubitCircuit, Gate
+from qutip.qip.circuit import QubitCircuit
 from pytket.circuit import Circuit as _TketCircuit
 from pytket.circuit.display import render_circuit_jupyter as _draw
 
 from itertools import combinations
-from scipy.linalg import null_space
 from scipy.optimize import linprog
 import scipy.sparse as sp
-import re
 from typing import Literal
 
 
@@ -58,7 +56,10 @@ class TrajectorySimulator:
         self.psi_initial = tensor(*[basis(2, 0) for _ in range(num_qubits)])
 
     def _format_theta_label(self, theta):
-        """Create a LaTeX label for theta."""
+        """
+        Internal.
+        Create a LaTeX label for theta.
+        """
         if np.isclose(theta, np.pi/2):
             return r'$\frac{\pi}{2}$'
         elif np.isclose(theta, np.pi/4):
@@ -70,6 +71,7 @@ class TrajectorySimulator:
 
     def _identify_entangled_groups(self):
         """
+        Internal.
         Find connected components of qubits via depth-first search on entangled_groups.
 
         Returns
@@ -104,13 +106,9 @@ class TrajectorySimulator:
 
     def _apply_gate_sequence(self, circuit, gate_sequence):
         """
+        Internal.
         Apply a gate sequence to every entangled group, mapping group-relative
         indices to absolute qubit indices.
-
-        This is the single general-purpose method used for both state preparation
-        and decoding. Passing a prep_sequence here during the prep stage and a
-        decoder_sequence during the decode stage is the entire mechanism — no
-        separate prep or decode logic exists.
 
         Parameters
         ----------
@@ -168,6 +166,7 @@ class TrajectorySimulator:
 
     def _map_group_indices_to_absolute(self, params, group):
         """
+        Internal.
         Map group-relative indices to absolute qubit indices.
 
         Parameters
@@ -192,6 +191,7 @@ class TrajectorySimulator:
 
     def _apply_trajectory(self, circuit, trajectory_qubits):
         """
+        Internal.
         Apply RZ(theta) to each qubit in the trajectory.
 
         Parameters
@@ -373,71 +373,13 @@ class TrajectorySimulator:
         plt.show()
 
 
-def _precompute_exponents(sets, n, N):
-    """
-    Compute the integer exponent array for every trajectory pair.
-
-    Returns
-    -------
-    pairs : list of (i, j) index pairs
-    exponents : int8 array of shape (n_pairs, N)
-        exponents[p, j] is the exponent used to compute d^{T,T'}_j.
-    """
-    k_range = np.arange(n)
-    j_range = np.arange(N, dtype=np.int64)
-
-    # bits[j, k] = (j >> (n-1-k)) & 1,  shape (N, n)
-    bits  = ((j_range[:, None] >> (n - 1 - k_range[None, :])) & 1).astype(np.int8)
-    signs = (1 - 2 * bits)  # shape (N, n), entries +/-1
-
-    pairs = list(combinations(range(len(sets)), 2))
-    exponents = np.empty((len(pairs), N), dtype=np.int8)
-    for idx, (i, j_idx) in enumerate(pairs):
-        c = np.array(
-            [(1 if k in sets[i] else 0) - (1 if k in sets[j_idx] else 0)
-             for k in range(n)],
-            dtype=np.int8,
-        )
-        exponents[idx] = signs @ c  # shape (N,)
-
-    return pairs, exponents
-
-
-def _build_from_exponents(pairs, exponents, N, theta):
-    """
-    Build the LP constraint matrix for a given theta using precomputed exponents.
-    All N-dimensional work is a single vectorised np.exp() call.
-
-    Returns a sparse CSR matrix A and dense rhs array b.
-    """
-    # d_all[p, j] = exp(i*theta/2 * exponents[p, j]),  shape (n_pairs, N)
-    d_all = np.exp((1j * theta / 2) * exponents.astype(np.float32))
-
-    # Stack real and imaginary rows for each pair, plus normalisation
-    n_pairs = len(pairs)
-    dense_rows = np.empty((2 * n_pairs + 1, N), dtype=np.float64)
-    dense_rows[0:2*n_pairs:2]  = d_all.real
-    dense_rows[1:2*n_pairs:2]  = d_all.imag
-    dense_rows[-1]              = 1.0  # normalisation
-
-    rhs = np.zeros(2 * n_pairs + 1)
-    rhs[-1] = 1.0
-
-    return sp.csr_matrix(dense_rows), rhs
-
-
-def _build(sets, n, N, theta):
-    """Convenience wrapper used by ts_solver (single-theta call, no caching needed)."""
-    pairs, exponents = _precompute_exponents(sets, n, N)
-    A, b = _build_from_exponents(pairs, exponents, N, theta)
-    return A, b, pairs
 
 
 # ──────────────────────────────────────────────────────────────────
 def _cyc_group(n):
     """
     Generate G = Z_n as a list of n permutation tuples (no n! search).
-    z^j sends qubit i -> (i+j) mod n.
+    z^j sends qubit i --> (i+j) mod n.
     """
     return [tuple((i + j) % n for i in range(n)) for j in range(n)]
 
@@ -481,30 +423,13 @@ def _parse_trajectories(traj_dict):
     return [frozenset(v) for v in traj_dict.values()]
 
 
-def _infer_n(trajectories, n=None):
-    """Infer n from the maximum qubit index across all trajectories."""
-    if n is not None:
-        return n
-    return max(q for T in trajectories for q in T) + 1
+
 
 
 # ──────────────────────────────────────────────
 #  Symmetry group
 # ──────────────────────────────────────────────
 
-def _find_symmetry_group(trajectories, n):
-    """
-    Return all permutations pi of [n] that map T -> T as a set.
-    Each permutation is a length-n tuple where pi[i] = j means qubit i -> j.
-    """
-    from itertools import permutations as _permutations
-    traj_set = frozenset(trajectories)
-    group = []
-    for perm in _permutations(range(n)):
-        mapped = frozenset(frozenset(perm[q] for q in T) for T in trajectories)
-        if mapped == traj_set:
-            group.append(perm)
-    return group
 
 def _sym_bitstring_orbits(n):
     """
@@ -534,9 +459,6 @@ def _compute_bitstring_orbits_cyc(n):
     Returns (frozenset_orbits, int_array_orbits) where:
       - frozenset_orbits : list of frozenset of bit-string tuples (for display)
       - int_array_orbits : list of np.ndarray of integers (for fast matrix build)
-
-    For cyclic G, the orbit of integer s under G~ is:
-        {rotate(s, j) for j in 0..n-1}  union  {flip(rotate(s, j)) for j in 0..n-1}
     """
     mask    = (1 << n) - 1
     visited = np.zeros(2 ** n, dtype=bool)
@@ -570,53 +492,9 @@ def _compute_bitstring_orbits_cyc(n):
     return fs_orbits, int_orbits
 
 # ──────────────────────────────────────────────
-#  Orbit computations  (Propositions 11, 12, 16 of [PRA])
+#  orbits  (Propositions 11, 12, 16 of [PRA])
 # ──────────────────────────────────────────────
 
-def _perm_act_on_bitstring(perm, s):
-    """Apply permutation pi to bit-string s: s'[pi[i]] = s[i]."""
-    n = len(s)
-    inv = [0] * n
-    for i, p in enumerate(perm):
-        inv[p] = i
-    return tuple(s[inv[k]] for k in range(n))
-
-
-def _compute_bitstring_orbits(n, perm_group):
-    """
-    Partition all 2^n bit-strings into orbits under G~ = G x {I, X^n}.
-
-    G~ acts by permuting qubit positions (G) and/or flipping all bits (X^n).
-    Returns a list of frozensets of bit-string tuples.
-    """
-    all_strings = [
-        tuple(int(b) for b in format(i, f"0{n}b"))
-        for i in range(2 ** n)
-    ]
-    visited = set()
-    orbits = []
-
-    for s0 in all_strings:
-        if s0 in visited:
-            continue
-        orbit = set()
-        stack = [s0]
-        while stack:
-            s = stack.pop()
-            if s in orbit:
-                continue
-            orbit.add(s)
-            for perm in perm_group:
-                ps = _perm_act_on_bitstring(perm, s)
-                if ps not in orbit:
-                    stack.append(ps)
-            flipped = tuple(1 - b for b in s)
-            if flipped not in orbit:
-                stack.append(flipped)
-        orbits.append(frozenset(orbit))
-        visited |= orbit
-
-    return orbits
 
 
 def _compute_traj_pair_orbits(trajectories, perm_group):
@@ -678,10 +556,6 @@ def _build_ts_matrix_fast(n, bs_orbit_ints, pair_orbits, theta):
     """
     Vectorized A(theta) builder using integer bit-string representations.
 
-    Replaces the per-string Python loop in _build_ts_matrix with numpy
-    operations: bit extraction via right-shift, vectorised exp, and sum —
-    giving ~100x speedup for large n.
-
     Parameters
     ----------
     bs_orbit_ints : list of np.ndarray
@@ -713,42 +587,9 @@ def _build_ts_matrix_fast(n, bs_orbit_ints, pair_orbits, theta):
     return A
 
 # ──────────────────────────────────────────────
-#  Matrix A(theta)  (Theorem 4, Eq. 58 of [PRA])
+#  A(theta)  (Theorem 4, Eq. 58 of [PRA])
 # ──────────────────────────────────────────────
 
-def _ts_matrix_element(T, Tp, s, theta):
-    r"""
-    Compute <s| R^{(T,T')}(theta) |s> for a single Z-eigenstate s.
-
-    Diagonal in the Z-eigenbasis:
-      each qubit j in T\T' contributes exp(-i*theta*(s_j - 1/2))
-      each qubit j in T'\T contributes exp(+i*theta*(s_j - 1/2))
-
-    The imaginary part cancels when summed over a bit-flip-closed orbit.
-    """
-    phase = complex(1.0)
-    for j in T - Tp:
-        phase *= np.exp(-1j * theta * (s[j] - 0.5))
-    for j in Tp - T:
-        phase *= np.exp(+1j * theta * (s[j] - 0.5))
-    return phase.real
-
-
-def _build_ts_matrix(n, bitstring_orbits, pair_orbits, theta):
-    """
-    Build the M x N matrix A(theta) from Theorem 4 of [PRA].
-
-    A[mu, nu] = sum_{s in omega_nu} <s| R^{(T,T')}(theta) |s>
-    Row mu=0 is the normalisation row (diagonal orbit gives A[0,nu] = |omega_nu|).
-    """
-    M = len(pair_orbits)
-    N = len(bitstring_orbits)
-    A = np.zeros((M, N))
-    for mu, pair_orbit in enumerate(pair_orbits):
-        T, Tp = next(iter(pair_orbit))
-        for nu, bs_orbit in enumerate(bitstring_orbits):
-            A[mu, nu] = sum(_ts_matrix_element(T, Tp, s, theta) for s in bs_orbit)
-    return A
 
 
 def _solve_ts_lp(A):
@@ -791,13 +632,7 @@ def _ts_state_from_lp(n, bs_orbits, c):
 def _sym_A_matrix(n, m, theta):
     """
     Build A(theta) analytically for T_sym(n, m) using Proposition 13 of [PRA],
-    Eq. (71):
-
-    A_{mu,nu}(theta) = alpha_nu * sum_{i=0}^{mu} sum_{i'=0}^{mu}
-                         C(mu,i) * C(mu,i') * C(n-2mu, nu-i-i') * cos[(i-i')*theta]
-
-    Avoids all group computation and the 2^n matrix-element loop entirely.
-    M = min(m, n-m)+1 rows, N = floor(n/2)+1 columns.
+    Eq. (71)
     """
     from math import comb
     N = n // 2 + 1
@@ -819,9 +654,7 @@ def _sym_A_matrix(n, m, theta):
 
 def _sym_analytical_c(n, m, theta):
     """
-    Analytical coefficients c_nu for T_sym(n, m=n/2), from Eq. (5) of [PRL]:
-
-        c_nu  proportional to  (-1)^{m-nu} * cos[(m-nu)*theta]
+    Analytical coefficients c_nu for T_sym(n, m=n/2), from Eq. (5) of [PRL]
 
     Skips the LP entirely. Returns None if m != n//2 or if infeasible at theta.
     Normalised so that A[0,:].c = 1 (the normalisation row).
@@ -863,12 +696,15 @@ class TSResult:
     orbits    : list of frozensets  (full G~-orbit partition)
     """
 
-    def __init__(self, n, theta_min, psi, orbits, c):
+    def __init__(self, n, theta_min, theta, psi, orbits, c, traj_dict, no_hit_ok):   
         self.n         = n
         self.theta_min = theta_min
+        self.theta     = theta
         self.psi       = psi
         self.orbits    = orbits
         self._c        = c   # LP coefficients — used to identify active orbits
+        self.traj_dict  = traj_dict   # {label: frozenset of qubit indices}
+        self.no_hit_ok  = no_hit_ok   # bool: |psi> ⊥ R^(T)|psi> for all T
 
     # ── Tuple-unpacking compatibility ────────────────────────────────────────
     def __iter__(self):
@@ -923,22 +759,136 @@ class TSResult:
         if bitstrings is not None:
             return _prepare_circuit(bitstrings, self.n, label="custom", verbose=verbose)
 
-        # Default: iterate all active orbits
-        results = []
-        for nu_i in self._active_nus():
-            bs = ["".join(map(str, s)) for s in sorted(self.orbits[nu_i])]
-            results.append(_prepare_circuit(bs, self.n, label=f"$\\omega_{{{nu_i}}}$", verbose=verbose))
-        return results
+        # Default: prepare full state (all orbits)
+        return _prepare_circuit_general(
+            self.psi.full().flatten(), self.n, label="full $|\\psi\\rangle$", verbose=verbose
+        )
+    
+    # ── Decoder ──────────────────────────────────────────────────────────────
+    def decode(self, outputs=None, no_hit=None, theta=None, verbose=True):
+        """
+        Build a decoder circuit U_decode satisfying:
 
+            U_decode @ R^(T)(theta) |psi>  =  |output_T>
 
-def solve_ts(n, m, kind:Literal['cyclic', 'symmetric']="cyclic", eps=1e-4, verbose=True):
+        for every trajectory T in the stored trajectory set.
+
+        Parameters
+        ----------
+        outputs : dict, optional
+            Custom output bitstring assignments {label: bitstring}.
+            Keys must match result.traj_dict labels.
+            Default: sequential T0->00..0, T1->00..01, T2->00..10, ...
+
+        no_hit : bool or None
+            Include no-hit (|psi> itself) as a decoder output.
+            None = auto (include if result.no_hit_ok), True = force,
+            False = exclude.
+
+        theta : float, optional
+            Interaction angle in radians for computing R^(T)(theta)|psi>.
+            Default: result.theta (theta_min + eps). Override when the
+            circuit uses a different interaction angle, e.g. result.theta_min.
+
+        verbose : bool
+
+        Returns
+        -------
+        (circuit, U_decode) : pytket Circuit, numpy ndarray (2^n, 2^n)
+        """
+        if self.psi is None:
+            raise ValueError("No valid TS state found — LP was infeasible.")
+
+        n          = self.n
+        theta      = theta if theta is not None else self.theta
+        traj_dict  = self.traj_dict
+
+        # ── Resolve outputs ──────────────────────────────────────────────────────────────────
+        stored_trajs = list(traj_dict.values())
+        if outputs is None:
+            stored_labels = list(traj_dict.keys())
+            outputs = {lbl: f"{i:0{n}b}" for i, lbl in enumerate(stored_labels)}
+            traj_for_decoder = {
+                lbl: [sorted(qset), outputs[lbl]]
+                for lbl, qset in traj_dict.items()
+            }
+        else:
+            # User-supplied outputs: match by position, not label name.
+            # Allows T1..T4 to line up with internally stored T0..T3.
+            user_labels = list(outputs.keys())
+            if len(user_labels) != len(stored_trajs):
+                raise ValueError(
+                    f"outputs has {len(user_labels)} entries but trajectory set "
+                    f"has {len(stored_trajs)}. Provide one output per trajectory."
+                )
+            traj_for_decoder = {
+                user_lbl: [sorted(stored_trajs[i]), outputs[user_lbl]]
+                for i, user_lbl in enumerate(user_labels)
+            }
+
+        # ── Resolve no_hit ──────────────────────────────────────────────────────────────────
+        if no_hit is None:
+            no_hit = self.no_hit_ok
+        if no_hit and not self.no_hit_ok:
+            raise ValueError(
+                "|psi> is not orthogonal to the trajectory states, so the "
+                "no-hit case cannot be included as a distinct decoder output. "
+                "Re-run solve_ts with no_hit=True to find a state that is."
+            )
+
+        # ── Build trajectories dict for build_decoder ──────────────────────
+        # (traj_for_decoder already set above)
+        # ── No-hit: find a free output slot ───────────────────────────────
+        no_hit_output = None
+        if no_hit:
+            used = set(outputs.values())
+            no_hit_output = next(
+                (f"{i:0{n}b}" for i in range(2**n) if f"{i:0{n}b}" not in used),
+                None
+            )
+            if no_hit_output is None:
+                raise ValueError(
+                    f"No free output bitstring for no-hit case — "
+                    f"all {2**n} computational basis states are already assigned."
+                )
+
+        return build_decoder(
+            trajectories  = traj_for_decoder,
+            n             = n,
+            theta         = theta,
+            psi           = self.psi,
+            no_hit_output = no_hit_output,
+            verbose       = verbose,
+        )
+
+def _no_hit_row(T1, bs_orbit_ints, n, theta):
+    """
+    Compute the LP constraint row for the no-hit orthogonality condition.
+
+    Parameters
+    ----------
+    T1            : frozenset — one representative trajectory
+    bs_orbit_ints : list of np.ndarray — integer representations of each orbit
+    n             : int
+    theta         : float
+
+    Returns
+    -------
+    row : np.ndarray, shape (N,) — one LP equality row with RHS = 0
+    """
+    T1_list = sorted(T1)
+    row = np.zeros(len(bs_orbit_ints))
+    for nu, s_ints in enumerate(bs_orbit_ints):
+        phase = np.ones(len(s_ints), dtype=complex)
+        for j in T1_list:
+            bits   = (s_ints >> (n - 1 - j)) & 1
+            phase *= np.exp(+1j * theta * (bits - 0.5))
+        row[nu] = phase.real.sum()
+    return row
+
+def solve_ts(n, m, kind:Literal['cyclic', 'symmetric']="cyclic", theta: float = None, no_hit: bool = False, eps=1e-4, verbose=True):
     """
     Compute theta_min and find a valid TS state for T_cyc(n,m) or T_sym(n,m).
-
-    Uses the group-theoretic LP reduction of Theorem 4 from [PRA]:
-    a TS state exists at theta iff  A(theta) c = d, c >= 0  is feasible.
-    The TS state is then  |psi> = sum_nu sqrt(c_nu) |nu>,  where |nu> is the
-    equal superposition of all bit-strings in the nu-th G~-orbit.
 
     Parameters
     ----------
@@ -966,29 +916,65 @@ def solve_ts(n, m, kind:Literal['cyclic', 'symmetric']="cyclic", eps=1e-4, verbo
         label     = rf"$\mathcal{{T}}_\text{{sym}}({n},{m})$"
 
     trajs = _parse_trajectories(traj_dict)
-    theta = tmin + eps
+    theta = theta if theta is not None else tmin + eps
 
     if kind == "symmetric":
-        # Fast path (Proposition 13 of [PRA]): build A analytically,
-        # skip the O(n!) group search, O(|T|^2) pair enumeration,
-        # and O(2^n) matrix-element loop entirely.
         bs_orbits   = _sym_bitstring_orbits(n)
         pair_orbits = _sym_pair_orbits_fast(n, m, trajs)
         A           = _sym_A_matrix(n, m, theta)
-        # For m=n/2: closed-form c_nu from Eq. (5) of [PRL] — skip LP too
         c = _sym_analytical_c(n, m, theta)
         if c is None:
             valid, c = _solve_ts_lp(A)
         else:
             valid = True
+        # For no_hit on symmetric: use integer orbit representations
+        _, bs_orbit_ints = _compute_bitstring_orbits_cyc(n) if no_hit else (None, None)
     else:
-        # Cyclic fast path: Z_n group (n elements) + integer-rotation orbit computation
         perm_group  = _cyc_group(n)
         bs_orbits, bs_orbit_ints = _compute_bitstring_orbits_cyc(n)
         pair_orbits = _compute_traj_pair_orbits(trajs, perm_group)
         A           = _build_ts_matrix_fast(n, bs_orbit_ints, pair_orbits, theta)
         valid, c       = _solve_ts_lp(A)
 
+    # ── No-hit extra constraint ───────────────────────────────────────────
+    # <psi| R^(T) |psi> = 0 for all T.
+    # For G-transitive trajectory sets with G-invariant |psi>, all trajectories
+    # give the same constraint — one representative T1 suffices.
+    # We stack one extra equality row onto A and re-solve.
+    no_hit_ok = False
+    if valid and no_hit:
+        if kind == "symmetric" and bs_orbit_ints is None:
+            _, bs_orbit_ints = _compute_bitstring_orbits_cyc(n)
+        T1       = next(iter(trajs))           # any representative trajectory
+        nh_row   = _no_hit_row(T1, bs_orbit_ints, n, theta)
+        A_nh     = np.vstack([A.toarray() if sp.issparse(A) else A, nh_row])
+        d_nh     = np.zeros(A_nh.shape[0]); d_nh[0] = 1.0
+        result_lp = linprog(
+            c      = np.zeros(A_nh.shape[1]),
+            A_eq   = A_nh,
+            b_eq   = d_nh,
+            bounds = [(0.0, None)] * A_nh.shape[1],
+            method = "highs",
+        )
+        if result_lp.status == 0:
+            valid    = True
+            c        = result_lp.x
+            no_hit_ok = True
+        else:
+            valid = False
+            if verbose:
+                niceprint(
+                    "⚠ **No-hit constraint is infeasible at this $\\theta$** — "
+                    "no TS state exists that also distinguishes the no-hit case. "
+                    "Try a larger $\\theta$ or set `no_hit=False`."
+                )
+    elif valid:
+        # Check post-hoc whether the solution is already no-hit orthogonal
+        if bs_orbit_ints is not None:
+            T1     = next(iter(trajs))
+            nh_row = _no_hit_row(T1, bs_orbit_ints, n, theta)
+            no_hit_ok = abs(float(nh_row @ c)) < 1e-6
+    
     # ── Header ────────────────────────────────────────────────────────
     if verbose:
         niceprint(
@@ -1000,7 +986,11 @@ def solve_ts(n, m, kind:Literal['cyclic', 'symmetric']="cyclic", eps=1e-4, verbo
     if not valid:
         if verbose:
             niceprint("**No TS state found** — LP infeasible at this $\\theta$.")
-        return tmin, None, bs_orbits
+        
+        return TSResult(
+            n=n, theta_min=tmin, theta=theta, psi=None,
+            orbits=bs_orbits, c=None, traj_dict=traj_dict, no_hit_ok=False
+        )
 
     # ── Orbit table ───────────────────────────────────────────────────
     psi   = _ts_state_from_lp(n, bs_orbits, c)
@@ -1027,8 +1017,7 @@ def solve_ts(n, m, kind:Literal['cyclic', 'symmetric']="cyclic", eps=1e-4, verbo
             # their bit-flip mirrors second — separated by <br> within the cell.
             by_weight = {}
             for s in strings:
-                w = s.count("1")
-                by_weight.setdefault(w, []).append(s)
+                by_weight.setdefault(s.count("1"), []).append(s)
             weights = sorted(by_weight)
 
             if len(weights) == 1:
@@ -1067,7 +1056,10 @@ def solve_ts(n, m, kind:Literal['cyclic', 'symmetric']="cyclic", eps=1e-4, verbo
         niceprint("\n".join(lines_out))
         niceprint("\u2713 = stabilizer state (Clifford-preparable via H + CNOT + X)")
 
-    return TSResult(n=n, theta_min=tmin, psi=psi, orbits=bs_orbits, c=c)
+    return TSResult(
+        n=n, theta_min=tmin, theta=theta, psi=psi,
+        orbits=bs_orbits, c=c, traj_dict=traj_dict, no_hit_ok=no_hit_ok
+    )
 
 
 
@@ -1086,9 +1078,7 @@ def _frac_of_pi(theta):
 # ──────────────────────────────────────────────────────────────────
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Orbit classification  &  state preparation
-# ══════════════════════════════════════════════════════════════════════════════
+# orbit id for state prep
 
 def _rref_f2(rows):
     """
@@ -1118,13 +1108,6 @@ def _is_coset_f2(mat):
     """
     Check if the rows of binary matrix mat form a coset of a linear subspace
     of F_2^n.
-
-    For an equal-amplitude state sum_{s in S} |s> to be a stabilizer state,
-    the support S must be a coset of a linear code over F_2^n.
-    (Mike & Ike §10.5; [PRA] Section V C — stabilizer TS codes.)
-
-    Two necessary conditions: |S| must be a power of 2, and S - v must be
-    closed under XOR for some (any) representative v in S.
     """
     K = len(mat)
     if K == 0:
@@ -1146,9 +1129,6 @@ def _is_coset_f2(mat):
 def _is_product_f2(mat, n):
     """
     Check if the equal-amplitude state sum_{s in S} |s> is a product state.
-
-    The state is separable iff S = S_0 x S_1 x ... x S_{n-1} (Cartesian
-    product of per-qubit subsets), i.e. the qubits are statistically independent.
     """
     from itertools import product as iprod
     K = len(mat)
@@ -1166,13 +1146,6 @@ def _is_product_f2(mat, n):
 def _qutip_to_tket(qutip_circuit, n):
     """
     Convert a QuTiP QubitCircuit (H, CNOT, X, RZ gates) to a pytket Circuit.
-
-    Gate mapping:
-      H    -> H
-      CNOT -> CX  (pytket uses CX for controlled-X)
-      X    -> X
-      RZ   -> Rz  (pytket Rz takes angle in half-turns, i.e. t where U = e^{i*pi*t/2}*Rz(pi*t))
-                  QuTiP arg_value is in radians; pytket wants turns = arg_value / pi
     """
     circ = _TketCircuit(n)
     for gate in qutip_circuit.gates:
@@ -1191,24 +1164,61 @@ def _qutip_to_tket(qutip_circuit, n):
     return circ
 
 
+def _prepare_circuit_general(psi_vec, n, label=None, verbose=True):
+    """
+    Prepare an arbitrary n-qubit state |psi> from |00...0> using the quantum
+    Shannon decomposition — works for any state, Clifford or not.
+
+    Parameters
+    ----------
+    psi_vec : array-like, shape (2^n,)
+        Target state vector (will be normalised internally).
+    n       : int
+    label   : str, optional
+    verbose : bool
+
+    Returns
+    -------
+    circuit : pytket Circuit
+    psi     : Qobj ket
+    """
+    from pytket.passes import DecomposeBoxes as _DBX, FullPeepholeOptimise as _FPO
+
+    d       = 2 ** n
+    psi_vec = np.array(psi_vec, dtype=complex)
+    psi_vec = psi_vec / np.linalg.norm(psi_vec)
+
+    # ── Build U_prep: first column = psi_vec ─────────────────────────────
+    # SVD of a (d,1) matrix: psi_vec = U[:,0] * s[0] * Vh[0,0]
+    # So U[:,0] = psi_vec / (s[0] * Vh[0,0]).  Fix phase so col 0 = psi_vec.
+    U_prep, s, Vh = np.linalg.svd(psi_vec.reshape(-1, 1), full_matrices=True)
+    U_prep[:, 0] *= s[0] * Vh[0, 0]   # now U_prep[:,0] = psi_vec exactly
+
+    # ── Synthesize ────────────────────────────────────────────────────────
+    circ = _TketCircuit(n)
+    _synth_unitary(U_prep, list(range(n)), circ)
+    _DBX().apply(circ)
+    _FPO().apply(circ)
+
+    psi_qobj = Qobj(psi_vec, dims=[[2] * n, [1] * n])
+
+    if verbose:
+        label_str = f" ({label})" if label else ""
+        niceprint(
+            f"**Non-Clifford preparation{label_str}** "
+            f"(quantum Shannon decomposition) <br>"
+            f"{circ.n_gates} gates, depth {circ.depth()}, "
+            f"{circ.n_2qb_gates()} two-qubit gates"
+        )
+        niceprint("**Prepared state $|\\psi\\rangle$:**")
+        cleandisp(psi_qobj, format='Dirac')
+        _draw(circ)
+
+    return circ, psi_qobj
+
 def _prepare_circuit(target_bitstrings, n, label=None, verbose=True):
     """
-    Build the shallowest circuit that prepares the equal superposition:
-
-        |psi>  =  (1/sqrt(K))  sum_{s in target}  |s>
-
-    If the target forms a coset of a linear code over F_2^n, uses only
-    Hadamard, CNOT, and X gates — the standard stabilizer encoding circuit.
-    (Mike & Ike §10.5.3, Problem 10.3; [PRA] Section IV B.)
-
-    Encoding circuit derivation:
-      1. Let v = any element of target (offset).
-      2. C = {s XOR v : s in target} is a k-dimensional linear subspace.
-      3. RREF of C over F_2 gives generator matrix G and pivot (free) columns.
-      4. Circuit:
-           H on each free qubit  f_i
-           CNOT(f_i -> c_j)  for each check qubit c_j where G[i, c_j] = 1
-           X on qubit j  where v[j] = 1  (applies the offset)
+    Build the shallowest circuit that prepares the equal superposition.
 
     If the target is NOT a linear coset, no Clifford circuit exists.
     The target state vector is still returned.
@@ -1242,10 +1252,10 @@ def _prepare_circuit(target_bitstrings, n, label=None, verbose=True):
     if not _is_coset_f2(mat):
         if verbose:
             niceprint(
-                "State prep not supported by just Clifford gates."
+                "State prep not Clifford constructable."
             )
             cleandisp(psi, format='Dirac')
-        return None, psi
+        return _prepare_circuit_general(vec, n, label=label, verbose=verbose)
 
     # ── Encoding circuit construction ──────────────────────────────────────
     v = mat[0]                                  # offset vector
@@ -1286,6 +1296,7 @@ def _prepare_circuit(target_bitstrings, n, label=None, verbose=True):
         niceprint(
             f"**Clifford preparation{label_str}** for $|\\psi\\rangle$: "
             f"{K} bitstrings, linear dimension $k = {k}$ <br><br>"
+            f"Prep Gate Count: <br>"
             f"Hadamards — {k} <br>"
             f"CNOTs — {n_cnots} <br>"
             f"X gates — {n_x} <br>"
@@ -1297,7 +1308,7 @@ def _prepare_circuit(target_bitstrings, n, label=None, verbose=True):
         psi_out = circuit.run(psi0)
         fid     = float(abs(np.vdot(psi_out.full().flatten(), psi.full().flatten()))**2)
     
-        niceprint(f"Fidelity = {fid:.8f}")
+        niceprint(f"Optimized Prep vs Target: Fidelity = {fid:.8f}")
         niceprint("**Prepared state $|\\psi\\rangle$:**")
         cleandisp(psi, format='Dirac')
 
@@ -1305,7 +1316,328 @@ def _prepare_circuit(target_bitstrings, n, label=None, verbose=True):
 
     return tket_circ, psi
 
-def prepare_ts_state(target_bitstrings, n):
-    return _prepare_circuit(target_bitstrings, n, label=None)
+
+
+
+def _synth_unitary(U, qubits, circ):
+    """
+    Recursively decompose the unitary U acting on `qubits` into H, CNOT, Rz,
+    Ry gates and add them to `circ`, using the quantum Shannon decomposition
+    (cosine-sine decomposition).
+    """
+    from scipy.linalg import cossin as _cossin
+    from pytket.circuit import (Unitary1qBox as _U1, Unitary2qBox as _U2,
+                                 Unitary3qBox as _U3,
+                                 MultiplexedRotationBox as _MRB,
+                                 OpType as _OT)
+    n = len(qubits)
+    d = 2**n
+    assert U.shape == (d, d), f"_synth_unitary: expected {d}×{d}, got {U.shape}"
+
+    if n == 1:
+        circ.add_unitary1qbox(_U1(U), qubits[0])
+        return
+    if n == 2:
+        circ.add_unitary2qbox(_U2(U), qubits[0], qubits[1])
+        return
+    if n == 3:
+        circ.add_unitary3qbox(_U3(U), qubits[0], qubits[1], qubits[2])
+        return
+
+    half = d // 2
+    (u1, u2), thetas, (v1h, v2h) = _cossin(U, p=half, q=half, separate=True)
+
+    # ── Right block: diag(v1h, v2h) ────────────────────────────────────────
+    _synth_unitary(v1h, qubits[1:], circ)
+    _synth_controlled(v2h @ v1h.conj().T, qubits[0], qubits[1:], circ)
+
+    # ── Centre: multiplexed Ry on qubits[0], controlled by qubits[1:] ──────
+    angles_ht = list(2.0 * thetas / np.pi)     # radians → half-turns
+    box = _MRB(angles_ht, _OT.Ry)
+    circ.add_multiplexedrotation(box, list(qubits[1:]) + [qubits[0]])
+
+    # ── Left block: diag(u1, u2) ────────────────────────────────────────────
+    _synth_unitary(u1, qubits[1:], circ)
+    _synth_controlled(u2 @ u1.conj().T, qubits[0], qubits[1:], circ)
+
+
+def _synth_controlled(W, ctrl, targs, circ):
+    """
+    Add a controlled-W gate to circ:.
+
+    n_t = 1, 2 : direct Unitary2qBox / Unitary3qBox (control + targets).
+    n_t >= 3   : eigendecompose W = V D V^dag, implement as
+                     V^dag  -->  controlled-diag(I, D)  -->  V
+                 where the diagonal box is pytket's DiagonalBox.
+    """
+    from pytket.circuit import (Unitary2qBox as _U2, Unitary3qBox as _U3,
+                                 DiagonalBox as _DB)
+    n_t = len(targs)
+    d_t = 2**n_t
+
+    if n_t == 1:
+        CW = np.block([[np.eye(2, dtype=complex), np.zeros((2, 2))],
+                       [np.zeros((2, 2)), W]])
+        circ.add_unitary2qbox(_U2(CW), ctrl, targs[0])
+        return
+
+    if n_t == 2:
+        CW = np.block([[np.eye(4, dtype=complex), np.zeros((4, 4))],
+                       [np.zeros((4, 4)), W]])
+        circ.add_unitary3qbox(_U3(CW), ctrl, targs[0], targs[1])
+        return
+
+    # n_t >= 3: W = V D V^dag
+    evals, V = np.linalg.eig(W)
+    _synth_unitary(V.conj().T, targs, circ)
+    diag = np.concatenate([np.ones(d_t, dtype=complex), evals])
+    circ.add_diagonal_box(_DB(diag), [ctrl] + list(targs))
+    _synth_unitary(V, targs, circ)
+
+
+# decoder
+
+def _rz_matrix(theta):
+    """Standard R_Z(theta) = diag(e^{-i*theta/2}, e^{i*theta/2})."""
+    return np.array([[np.exp(-1j * theta / 2), 0.0],
+                     [0.0, np.exp( 1j * theta / 2)]], dtype=complex)
+
+
+def _apply_trajectory(qubits_hit, n, thetas, psi_vec):
+    """
+    Apply trajectory to psi_vec.
+
+    thetas : float  — uniform angle applied to every qubit in qubits_hit
+             list   — per-qubit angles, same order as qubits_hit
+
+    Qubit ordering: qubit 0 is the most-significant bit (pytket convention).
+    Reference: [PRA] Eq. (2); [PRL] Eq. (1).
+    """
+    if isinstance(thetas, (int, float, np.floating)):
+        theta_map = {q: float(thetas) for q in qubits_hit}
+    else:
+        theta_map = dict(zip(qubits_hit, thetas))
+    ops = [_rz_matrix(theta_map[q]) if q in theta_map else np.eye(2, dtype=complex)
+           for q in range(n)]
+    R = ops[0]
+    for o in ops[1:]:
+        R = np.kron(R, o)
+    return R @ psi_vec
+
+def build_decoder(trajectories, n, theta, psi, no_hit_output=None, verbose=True):
+    """
+    Build a pytket circuit implementing the decoder unitary U_decode for every trajectory T in the dict.
+
+    Parameters
+    ----------
+    trajectories : dict
+        {label: [qubit_indices, output_bitstring]}
+        qubit_indices : list of 0-based ints hit by the particle for label T
+        output_bitstring : n-bit string giving the measurement output for T
+        e.g. {'T0': [[], '0000'], 'T1': [[0,1], '0001'], ...}
+    n             : int   — number of qubits
+    theta         : float — interaction angle in radians
+    psi           : Qobj ket — TS initial state
+    no_hit_output : str or None
+        If given, |psi> itself (the no-hit state) is mapped to this output
+        bitstring. Must be orthogonal to all trajectory states.
+    verbose       : bool
+
+    Returns
+    -------
+    circuit  : pytket Circuit
+    U_decode : numpy ndarray, shape (2^n, 2^n) — the decoder unitary matrix
+    """
+    from pytket.passes import DecomposeBoxes as _DB, FullPeepholeOptimise as _FPO
+
+    d       = 2**n
+    psi_vec = psi.full().flatten()
+
+    # ── Step 1: post-trajectory state vectors ────────────────────────────────
+    # theta may be:
+    #   float                  — uniform angle for all trajectories
+    #   dict {label: float}    — per-trajectory uniform angle
+    #   dict {label: list}     — per-trajectory, per-qubit angles
+    traj_vecs = {}   # label -> (col_idx, unit_vec)
+    for label, (qidx, outbits) in trajectories.items():
+        if isinstance(theta, dict):
+            t = theta.get(label, theta.get(list(theta.keys())[0]))
+        else:
+            t = theta
+        v = _apply_trajectory(qidx, n, t, psi_vec)
+        v = v / np.linalg.norm(v)
+        traj_vecs[label] = (int(outbits, 2), v)
+
+    # ── Step 2: no-hit case ──────────────────────────────────────────────────
+    no_hit_v = psi_vec / np.linalg.norm(psi_vec)
+    if no_hit_output is not None:
+        # Verify orthogonality
+        max_ov = max(abs(np.dot(no_hit_v.conj(), v)) for _, v in traj_vecs.values())
+        if max_ov > 1e-4:
+            raise ValueError(
+                f"|psi> has overlap {max_ov:.4f} with a trajectory state — "
+                "it cannot be used as a distinct no-hit output. "
+                "Re-run solve_ts with no_hit=True."
+            )
+        traj_vecs['no_hit'] = (int(no_hit_output, 2), no_hit_v)
+        if verbose:
+            niceprint(f"✓ No-hit state included as output `{no_hit_output}`.")
+    else:
+        # Inform user post-hoc whether no-hit is available
+        max_ov = max(abs(np.dot(no_hit_v.conj(), v)) for _, v in traj_vecs.values())
+        if verbose and max_ov < 1e-6:
+            niceprint(
+                "ℹ No-hit state is orthogonal to all trajectory states — "
+                "pass `no_hit=True` to result.decode() to include it."
+            )
+
+    # ── Step 3: verify mutual orthogonality ─────────────────────────────────
+    vecs      = [v for _, v in traj_vecs.values()]
+    cross     = np.abs(np.array([[np.dot(vecs[i].conj(), vecs[j])
+                                   for j in range(len(vecs))]
+                                  for i in range(len(vecs))]))
+    np.fill_diagonal(cross, 0.0)
+    max_cross = cross.max()
+    if max_cross > 1e-4 and verbose:
+        niceprint(
+            f"⚠ States not fully orthogonal (max off-diagonal overlap = {max_cross:.2e}). "
+            "Verify theta is the correct interaction angle."
+        )
+
+    # ── Step 4: build U_decode† ──────────────────────────────────────────────
+    # Column output_T of U_decode† = v_T.  Remaining columns from SVD complement.
+    target_to_vec = {col: v for _, (col, v) in traj_vecs.items()}
+    U_dag         = np.zeros((d, d), dtype=complex)
+    for col, v in target_to_vec.items():
+        U_dag[:, col] = v
+
+    K             = len(target_to_vec)
+    V_mat         = np.array(list(target_to_vec.values())).T   # (d, K)
+    U_svd, _s, _  = np.linalg.svd(V_mat, full_matrices=True)
+    complement     = U_svd[:, K:]                               # (d, d-K)
+    free_cols      = [c for c in range(d) if c not in target_to_vec]
+    for i, col in enumerate(free_cols):
+        U_dag[:, col] = complement[:, i]
+
+    from scipy.linalg import polar as _polar
+    U_dag, _ = _polar(U_dag)
+    U_decode = U_dag.conj().T
+
+    # ── Unitarity check ──────────────────────────────────────────────────────
+    unit_err = float(np.max(np.abs(U_decode @ U_decode.conj().T - np.eye(d))))
+
+    # ── Step 5: fidelity table ───────────────────────────────────────────────
+    if verbose:
+        rows = []
+        for label, (col, v) in traj_vecs.items():
+            out    = U_decode @ v
+            target = np.zeros(d, dtype=complex); target[col] = 1.0
+            fid    = float(abs(np.dot(out.conj(), target))**2)
+            rows.append((label, f"{col:0{n}b}", fid))
+        lines = ["| Trajectory | Output | Fidelity |", "|:---:|:---:|:---:|"]
+        for label, bits, fid in rows:
+            lines.append(f"| {label} | `{bits}` | {fid:.8f} |")
+        niceprint("\n".join(lines))
+        niceprint(f"Unitarity error: ${unit_err:.2e}$")
+
+    # ── Step 6: synthesize ───────────────────────────────────────────────────
+    if verbose and n > 6:
+        niceprint(
+            f"⚠ n={n}: decoder is a ${d}\\times{d}$ unitary — "
+            "circuit synthesis via quantum Shannon decomposition is exact but "
+            "produces a large number of gates."
+        )
+
+    from pytket.circuit import Circuit as _TK
+    circ = _TK(n)
+    _synth_unitary(U_decode, list(range(n)), circ)
+    _DB().apply(circ)
+    _FPO().apply(circ)
+
+    if verbose:
+        niceprint(
+            f"**Decoder circuit:** {circ.n_gates} gates, "
+            f"depth {circ.depth()}, {circ.n_2qb_gates()} two-qubit gates"
+        )
+        _draw(circ)
+
+    return circ, U_decode
+
+
+def build_ts_circuit(result, intercepted_qubits, theta_turns=None,
+                     bitstrings=None, decoder_circuit=None, verbose=False):
+    """
+    Assemble the full sensing circuit:  prep --> trajectory Rzs --> decoder.
+
+    Parameters
+    ----------
+    result             : TSResult from solve_ts
+    intercepted_qubits : list of int — 0-based qubit indices hit by particle
+    theta_turns        : float or list of float, optional
+        Interaction strength in pytket half-turns (= theta / pi).
+        - float : uniform angle applied to every intercepted qubit
+        - list  : per-qubit angles, same order as intercepted_qubits
+        Default: result.theta_min / pi (uniform).
+        When using a list, pass a matching theta dict to result.decode() so
+        the decoder is built from the same per-qubit angles.
+    bitstrings         : list of str, optional
+        Custom bitstrings for result.prepare(bitstrings=...).
+        If None, prepares result.psi directly.
+    decoder_circuit    : pytket Circuit, optional
+        Pre-built decoder circuit to append.  Pass this when building circuits
+        for several trajectories to avoid synthesising the same decoder
+        repeatedly — build it once with result.decode(), then reuse:
+
+            circ_decode, U = result.decode(theta=theta_min, verbose=False)
+            for name, qubits in trajectories.items():
+                circ = build_ts_circuit(result, qubits,
+                                        decoder_circuit=circ_decode)
+
+    verbose            : bool
+
+    Returns
+    -------
+    circuit : pytket Circuit
+    """
+    n        = result.n
+    theta_ht = theta_turns if theta_turns is not None else result.theta_min / np.pi
+    if isinstance(theta_ht, (list, np.ndarray)):
+        theta_rad = [t * np.pi for t in theta_ht]
+    else:
+        theta_rad = float(theta_ht) * np.pi
+
+    # ── State preparation ─────────────────────────────────────────────────
+    if bitstrings is not None:
+        circ, _ = result.prepare(bitstrings=bitstrings, verbose=verbose)
+    else:
+        circ, _ = result.prepare(verbose=verbose)
+
+    all_qubits = list(range(n))
+    circ.add_barrier(all_qubits)
+
+    # ── Particle interaction ──────────────────────────────────────────────
+    # theta_turns may be a float (uniform) or list (per-qubit, same order as
+    # intercepted_qubits).  theta_ht is only used for the uniform case.
+    if isinstance(theta_turns, (list, np.ndarray)):
+        if len(theta_turns) != len(intercepted_qubits):
+            raise ValueError(
+                f"theta_turns has {len(theta_turns)} values but "
+                f"intercepted_qubits has {len(intercepted_qubits)} qubits."
+            )
+        for q, ht in zip(intercepted_qubits, theta_turns):
+            circ.Rz(float(ht), q)
+    else:
+        for q in intercepted_qubits:
+            circ.Rz(theta_ht, q)
+
+    circ.add_barrier(all_qubits)
+
+    # ── Decoder ───────────────────────────────────────────────────────────
+    if decoder_circuit is None:
+        decoder_circuit, _ = result.decode(theta=theta_rad, verbose=verbose)
+    circ.append(decoder_circuit)
+
+    return circ
+
 
 

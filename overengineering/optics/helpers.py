@@ -39,7 +39,7 @@ _SETTINGS = {
 
 
 def _stokes_contrast(n_plus, n_minus) -> float:
-    """(N₊ − N₋) / (N₊ + N₋).  Returns 0 if both are zero."""
+    """(N+ - N-) / (N+ + N-).  Returns 0 if both are zero."""
     total = n_plus + n_minus
     return float((n_plus - n_minus) / total) if total > 0 else 0.0
 
@@ -143,16 +143,9 @@ def sweep_focal_lengths(
     top_n:        int = 10,
 ) -> List[Dict]:
     """
-    Sweep all (f1, f2) combinations from the standard lab lens set and run
-    FiberModeMatchOptimizer for each, returning the top_n results ranked by
-    coupling efficiency.
-
-    For each (f1, f2) pair the optimizer finds the optimal L2-to-collimator
-    distance (d_L2coll) while d0 and d_12 are held fixed.
-
     Available focal lengths
     -----------------------
-    50, 75, 100, 150, 200, 300 mm  (standard lab stock)
+    50, 75, 100, 150, 200, 300 mm
 
     Parameters
     ----------
@@ -220,15 +213,9 @@ def sweep_telescope_focal_lengths(
     top_n:        int = 10,
 ) -> List[Dict]:
     """
-    Sweep over all (f1, f2) pairs from the standard available focal lengths
-    and find which telescope configuration gives the best fiber coupling.
-
-    For each pair the optimizer finds the optimal L2-to-collimator distance
-    (d_L2coll) while d0 and d_12 are held fixed.
-
     Available focal lengths
     -----------------------
-    50, 75, 100, 150, 200, 300 mm  (standard lab stock)
+    50, 75, 100, 150, 200, 300 mm
 
     Parameters
     ----------

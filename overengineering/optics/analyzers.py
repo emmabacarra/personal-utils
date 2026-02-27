@@ -15,17 +15,6 @@ import warnings
 class FiberModeMatchOptimizer:
     """
     Optimize fiber mode-matching for a packaged fiber collimator.
-
-    Assumes a fixed optical layout with a telescope followed by a fiber
-    collimator. The telescope and fiber parameters are fixed, and the 
-    optimizer adjusts the distance from the second telescope lens to the 
-    collimator `d_L2coll` to achieve optimal mode-matching.
-    
-    The optimizer minimizes the normalized q-mismatch at the fiber face:
-
-        mismatch = |q_beam - q_fiber| / |q_fiber|
-
-    where q_fiber = i * pi * w_fiber^2 / lambda  (ideal flat-wavefront Gaussian).
     """
 
     def __init__(
@@ -52,10 +41,8 @@ class FiberModeMatchOptimizer:
 
     def _propagate_to_fiber(self, d_L2coll: float) -> complex:
         """
+        Internal.
         Propagate q from the laser waist through the full train to the fiber face.
-
-        The fiber face is the back focal plane of the collimator, so q is
-        evaluated immediately after the collimator lens with no further propagation.
 
         Returns
         -------
@@ -115,14 +102,14 @@ class FiberModeMatchOptimizer:
         Returns
         -------
         dict with keys:
-            d_12  – fixed L1-to-L2 spacing [m]
-            d_L2coll         – optimized L2-to-collimator distance [m]
-            mismatch         – normalized |Delta q|/|q_fiber|
-            coupling_eff     – Gaussian mode overlap η  (0 to 1)
-            w_at_fiber       – achieved beam waist at fiber face [m]
-            R_at_fiber       – wavefront radius of curvature at fiber face [m]
-            w_fiber_target   – target fiber mode-field radius [m]
-            success          – scipy optimizer success flag
+            d_12  - fixed L1-to-L2 spacing [m]
+            d_L2coll         - optimized L2-to-collimator distance [m]
+            mismatch         - normalized |Delta q|/|q_fiber|
+            coupling_eff     - Gaussian mode overlap η  (0 to 1)
+            w_at_fiber       - achieved beam waist at fiber face [m]
+            R_at_fiber       - wavefront radius of curvature at fiber face [m]
+            w_fiber_target   - target fiber mode-field radius [m]
+            success          - scipy optimizer success flag
         """
         result = differential_evolution(
             self._cost,
@@ -200,7 +187,7 @@ class FiberModeMatchOptimizer:
             f"Waist mismatch: {abs(r['w_at_fiber'] - r['w_fiber_target']) / r['w_fiber_target'] * 100:.2f} % <br>"
             f"Wavefront $R$ at fiber face: "
             + (
-                "$\\infty$ (flat – ideal)" if np.isinf(r["R_at_fiber"])
+                "$\\infty$ (flat - ideal)" if np.isinf(r["R_at_fiber"])
                 else f"{r['R_at_fiber'] * 1e3:.2f} mm"
             )
         )
@@ -497,11 +484,6 @@ class TelescopeOptimizer:
 class CavityAnalyzer:
     """
     Analyze optical cavity stability and modes.
-    
-    A cavity is stable when the round-trip beam reproduces itself.
-    This requires: 0 < g₁*g₂ < 1
-    
-    where g_i = 1 - L/R_i for each mirror.
     """
     
     def __init__(self, wavelength: float):
@@ -605,9 +587,6 @@ class CavityAnalyzer:
     def find_eigenmode(self, M: np.ndarray) -> Optional[complex]:
         """
         Find the eigenmode q-parameter of the cavity.
-        
-        Eigenmode satisfies: q = (A*q + B) / (C*q + D)
-        Rearranging: C*q^2 + (D-A)*q - B = 0
         """
         A, B, C, D = M[0, 0], M[0, 1], M[1, 0], M[1, 1]
         
@@ -1019,9 +998,7 @@ class BellInequalityAnalyzer:
         ]
         return cls(measurements=measurements, **kwargs)
 
-    # ───────────────────────────────────────────────────────────────────────────
-    # Data Analysis Methods
-    # ───────────────────────────────────────────────────────────────────────────
+    
     
     @staticmethod
     def compute_E(N_pp: float, N_pm: float, N_mp: float, N_mm: float
@@ -1033,10 +1010,6 @@ class BellInequalityAnalyzer:
           N_pm : (alpha,    beta+90)  -- Alice +1, Bob -1
           N_mp : (alpha+90, beta   )  -- Alice -1, Bob +1
           N_mm : (alpha+90, beta+90)  -- Alice -1, Bob -1
-
-        Formula (general, external to notes):
-            E = [(N_pp + N_mm) - (N_pm + N_mp)] / T
-            sigma_E = sqrt((1 - E^2) / T)
 
         Returns
         -------
@@ -1052,14 +1025,6 @@ class BellInequalityAnalyzer:
     def compute_S(self, state: Optional[str] = None) -> Dict:
         """
         Compute <S> and its uncertainty from loaded BellMeasurement rows.
-
-        Each E-value draws from four angle combinations: the base pair and
-        their 90-deg-shifted counterparts (all present in the 16-row dataset).
-
-          'triplet':  <S> = E(0,-22.5) + E(0,22.5) + E(45,22.5) - E(45,-22.5)
-          'singlet':  <S> = E(45,-22.5) + E(0,-22.5) + E(45,112.5) - E(0,112.5)
-
-        Source: Entanglement notes, Eq. 25 (page 11).
 
         Parameters
         ----------
@@ -1110,12 +1075,10 @@ class BellInequalityAnalyzer:
                 if abs(S) > 2 else " — No violation detected")
         )
 
-    # ───────────────────────────────────────────────────────────────────────────
-    # Simulation Methods
-    # ───────────────────────────────────────────────────────────────────────────
-
+    
     def _arm_amplitudes(self, angle: float) -> Tuple[complex, complex, complex, complex]:
         """
+        Internal.
         Transmission (T) and reflection (R) amplitudes for |H> and |V> inputs
         through a PBS at angle [radians].
 
@@ -1144,7 +1107,8 @@ class BellInequalityAnalyzer:
 
     def _joint_probs(self, alpha: float, beta: float) -> Tuple[float, float, float, float]:
         """
-        Compute P_HH, P_HV, P_VH, P_VV from OpticalCircuit amplitudes.
+        Internal.
+        Compute P_HH, P_HV, P_VH, P_VV.
         """
         t_aH, t_aV, r_aH, r_aV = self._arm_amplitudes(alpha)
         t_bH, t_bV, r_bH, r_bV = self._arm_amplitudes(beta)
@@ -1211,12 +1175,6 @@ class BellInequalityAnalyzer:
     def run_chsh(self, P_pump: Optional[float] = None, T_acq: float = 15.0) -> Dict:
         """
         Simulate the full 4-setting CHSH experiment.
-
-        CHSH operator (Entanglement notes, Eq. 25):
-            S = E(a1,b1) + E(a1,b2) + E(a2,b1) - E(a2,b2)
-
-        Uncertainty (Poisson, settings independent):
-            sigma_S = sqrt(sum_i sigma_Ei^2)
 
         Parameters
         ----------
@@ -1345,10 +1303,7 @@ class BellInequalityAnalyzer:
         plt.tight_layout()
         return fig
 
-    # ───────────────────────────────────────────────────────────────────────────
-    # Photon Statistics Methods (g^(2) analysis)
-    # ───────────────────────────────────────────────────────────────────────────
-
+    
     @staticmethod
     def g2_unheralded(
         N1: float, N2: float, N12: float, tau: float, T: float,

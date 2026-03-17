@@ -1,6 +1,10 @@
 from ..general import *
-from .params import *
-from .simulators import *
+from .params import (
+    SPDC, BellMeasurement, LaserBeam, Telescope, CavityGeometry
+)
+from .simulators import (
+    GaussianBeamTool, OpticalCircuit, BowTieCavity, SPDCSimulator
+)
 from scipy.constants import h, c
 
 import numpy as np
@@ -704,194 +708,6 @@ class CavityAnalyzer:
 
 
 
-class QuantumStateTomographer:
-    """
-    Full quantum state tomography simulator for single and two-photon polarization states.
-
-    Parameters
-    ----------
-    n_counts : int
-        Expected photon counts per measurement setting.
-    angle_error_rad : float
-        Max waveplate angle error (radians).  0 = ideal apparatus.
-    wavelength : float
-        Photon wavelength (m).  Default 810 nm (quED SPDC output).
-    seed : int or None
-    """
-
-    def __init__(self, n_counts: int = 10000,
-                 angle_error_rad: float = 0.0,
-                 wavelength: float = 810e-9,
-                 seed=None):
-        self.n_counts = n_counts
-        self.angle_error_rad = angle_error_rad
-        self.wavelength = wavelength
-        self.seed = seed
-        self._rng = np.random.default_rng(seed)
-
-    def _to_rho(self, state) -> np.ndarray:
-        """Return ideal density matrix as (n,n) numpy array."""
-        if isinstance(state, Qobj):
-            return (state * state.dag()).full() if state.type == 'ket' else state.full()
-        arr = np.asarray(state, dtype=complex)
-        if arr.ndim == 1:
-            return np.outer(arr, arr.conj())
-        return arr
-
-    def _proj_ket(self, qwp_angle: float, hwp_angle: float) -> np.ndarray:
-        """
-        Build the analysis circuit and extract the effective projection ket.
-        """
-        from .helpers import _analysis_circuit
-        circ = _analysis_circuit(qwp_angle, hwp_angle, self.wavelength)
-        J    = circ.get_total_jones_matrix()
-        proj = J.conj().T[:, 0]
-        proj /= (np.linalg.norm(proj) + 1e-15)
-        return proj
-
-    def _noisy_qwp_hwp(self, label: str) -> Tuple[float, float]:
-        """Return (QWP, HWP) angles for label, with optional random error."""
-        from .helpers import _SETTINGS
-        qwp, hwp = _SETTINGS[label]
-        if self.angle_error_rad > 0:
-            qwp += self._rng.uniform(-self.angle_error_rad, self.angle_error_rad)
-            hwp += self._rng.uniform(-self.angle_error_rad, self.angle_error_rad)
-        return qwp, hwp
-
-    def run_1photon(self, state) -> dict:
-        """
-        Simulate single-photon tomography.
-
-        Parameters
-        ----------
-        state : Qobj (ket or dm) or np.ndarray
-
-        Returns
-        -------
-        dict
-            'rho_ideal'   : Qobj   — ideal density matrix
-            'rho_noisy'   : Qobj   — reconstructed from simulated counts
-            'counts'      : ndarray shape (6,)  — [H, V, D, A, R, L]
-            'stokes'      : dict   — S1, S2, S3 values
-            'properties'  : dict   — trace and purity
-            'eigenvalues' : ndarray
-            'eigenvectors': list[Qobj]
-        """
-        from .helpers import _LABELS_1Q, density_matrix_1photon, _stokes_contrast, rho_eigensystem, rho_properties
-        
-        rho_arr   = self._to_rho(state)
-        rho_ideal = Qobj(rho_arr)
-        counts    = np.zeros(6, dtype=float)
-
-        for k, label in enumerate(_LABELS_1Q):
-            qwp, hwp = self._noisy_qwp_hwp(label)
-            proj     = self._proj_ket(qwp, hwp)
-            p        = float(np.real(proj.conj() @ rho_arr @ proj))
-            counts[k]= self._rng.poisson(max(p, 0) * self.n_counts)
-
-        rho_noisy = density_matrix_1photon(counts)
-        vals, vecs = rho_eigensystem(rho_noisy)
-        props      = rho_properties(rho_noisy)
-
-        stokes = {
-            'S1': _stokes_contrast(counts[2], counts[3]),   # D/A
-            'S2': _stokes_contrast(counts[4], counts[5]),   # R/L
-            'S3': _stokes_contrast(counts[0], counts[1]),   # H/V
-        }
-
-        return {
-            'rho_ideal':    rho_ideal,
-            'rho_noisy':    rho_noisy,
-            'counts':       counts,
-            'stokes':       stokes,
-            'properties':   props,
-            'eigenvalues':  vals,
-            'eigenvectors': vecs,
-        }
-
-    def run_2photon(self, state_2q) -> dict:
-        """
-        Simulate two-photon tomography.
-        
-        Parameters
-        ----------
-        state_2q : Qobj (ket or dm), shape 4x1 or 4x4
-            Two-qubit state in {HH, HV, VH, VV} ordering.
-
-        Returns
-        -------
-        dict
-            'rho_ideal'   : Qobj
-            'rho_noisy'   : Qobj
-            'counts_36'   : ndarray shape (6, 6) — coincidence matrix
-            'properties'  : dict
-            'eigenvalues' : ndarray
-            'eigenvectors': list[Qobj]
-        """
-        from .helpers import _LABELS_1Q, density_matrix_2photon, _stokes_contrast, rho_eigensystem, rho_properties
-        
-        rho_arr   = self._to_rho(state_2q)
-        rho_ideal = Qobj(rho_arr)
-        counts_36 = np.zeros((6, 6), dtype=float)
-
-        for a, la in enumerate(_LABELS_1Q):
-            qwp_a, hwp_a = self._noisy_qwp_hwp(la)
-            proj_a       = self._proj_ket(qwp_a, hwp_a)
-
-            for b, lb in enumerate(_LABELS_1Q):
-                qwp_b, hwp_b = self._noisy_qwp_hwp(lb)
-                proj_b       = self._proj_ket(qwp_b, hwp_b)
-
-                kab           = np.kron(proj_a, proj_b)
-                p             = float(np.real(kab.conj() @ rho_arr @ kab))
-                counts_36[a, b] = self._rng.poisson(max(p, 0) * self.n_counts)
-
-        rho_noisy  = density_matrix_2photon(counts_36)
-        vals, vecs = rho_eigensystem(rho_noisy)
-        props      = rho_properties(rho_noisy)
-
-        return {
-            'rho_ideal':    rho_ideal,
-            'rho_noisy':    rho_noisy,
-            'counts_36':    counts_36,
-            'properties':   props,
-            'eigenvalues':  vals,
-            'eigenvectors': vecs,
-        }
-
-    def print_summary(self, result: dict, label: str = ""):
-        
-        niceprint('---')
-        niceprint(f"**Quantum State Tomography{': ' + label if label else ''}**", 3)
-
-        props = result['properties']
-        is_1q = 'counts' in result
-
-        if is_1q:
-            N = result['counts'].astype(int)
-            niceprint("<u>Measurement Counts</u>", 5)
-            niceprint(f"H: {N[0]:6d} &nbsp;&nbsp; V: {N[1]:6d} <br>"
-                      f"D: {N[2]:6d} &nbsp;&nbsp; A: {N[3]:6d} <br>"
-                      f"R: {N[4]:6d} &nbsp;&nbsp; L: {N[5]:6d}")
-
-            S = result['stokes']
-            niceprint("<u>Stokes Parameters</u>", 5)
-            niceprint(f"$S_1$ (D/A): {S['S1']:+.4f} <br>"
-                      f"$S_2$ (R/L): {S['S2']:+.4f} <br>"
-                      f"$S_3$ (H/V): {S['S3']:+.4f}")
-
-        niceprint("<u>Reconstructed $\\rho$</u>", 5)
-        niceprint(cleandisp(result['rho_noisy'], return_str='Markdown'))
-
-        niceprint("<u>State Properties</u>", 5)
-        niceprint(f"$\\text{{Tr}}{{\\rho}}$ = {props['trace']:.6f} <br>"
-                  f"Purity $\\text{{Tr}}{{\\rho^2}}$ = {props['purity']:.6f}")
-
-        niceprint("<u>Eigenvalues</u>", 5)
-        niceprint(" &nbsp;&nbsp; ".join(f"{v:.4f}" for v in result['eigenvalues']))
-
-        niceprint('---')
-
 class BellInequalityAnalyzer:
     """
     CHSH Bell inequality class for analysis and simulation.
@@ -916,8 +732,14 @@ class BellInequalityAnalyzer:
     # Optimal CHSH angles for both Bell states [radians].
     # CHSH formula S = E(a1,b1) + E(a1,b2) + E(a2,b1) - E(a2,b2)
     CHSH_ANGLES = {
-        'singlet': {'alpha': (0.0, np.pi / 4), 'beta': (-np.pi / 8,  np.pi / 8)},
-        'triplet': {'alpha': (0.0, np.pi / 4), 'beta': ( np.pi / 8, -np.pi / 8)},
+        'singlet': { #PHI-
+            'alpha': (0.0,          np.pi / 4),
+            'beta':  (-np.pi / 8,    5*np.pi / 8),
+        },
+        'triplet': { #PHI+
+            'alpha': (0.0,          3*np.pi / 4),
+            'beta':  (-np.pi / 8,    5*np.pi / 8),
+        },
     }
 
     def __init__(
@@ -1112,7 +934,7 @@ class BellInequalityAnalyzer:
         """
         t_aH, t_aV, r_aH, r_aV = self._arm_amplitudes(alpha)
         t_bH, t_bV, r_bH, r_bV = self._arm_amplitudes(beta)
-        sign = -1.0 if self.state == 'singlet' else +1.0
+        sign = +1.0 if self.state == 'triplet' else -1.0
         s2   = np.sqrt(2.0)
 
         A_HH = (t_aH * t_bH + sign * t_aV * t_bV) / s2
@@ -1192,7 +1014,7 @@ class BellInequalityAnalyzer:
 
         a1, a2 = self.angles['alpha']
         b1, b2 = self.angles['beta']
-        chsh_configs = [(a1, b1, +1.0), (a1, b2, +1.0), (a2, b1, +1.0), (a2, b2, -1.0)]
+        chsh_configs = [(a1, b1, +1.0), (a2, b1, +1.0), (a1, b2, -1.0), (a2, b2, +1.0)]
 
         results, S, var_S = {}, 0.0, 0.0
         for alpha, beta, sign in chsh_configs:

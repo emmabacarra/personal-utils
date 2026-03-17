@@ -78,6 +78,30 @@ def niceprint(s, header_size=0, method: Literal['Markdown', 'Latex']='Markdown')
             display(Latex(f"\\begin{{equation*}}{s}\\end{{equation*}}"))
 
 
+def nicetable(headers: list[str], rows: list[list[str]], align: str = None):
+    '''
+    Make a nice table!
+    
+    Compatible with Latex formatting. Use colored text like r'$\color{red}\\times$' or r'$\color{green}\checkmark$' for pass/fail indicators, for example.
+    
+    Note: if typing a ket/bra, use \\vert and \\rangle to avoid issues with markdown parsing
+    '''
+    n = len(headers)
+    if align is None:
+        align = 'c' * n # default center alignment
+
+    align_map = {'l': ':---', 'c': ':---:', 'r': '---:'}
+    sep = [align_map.get(a, '---') for a in align]
+
+    lines = []
+    lines.append("| " + " | ".join(headers) + " |")
+    lines.append("| " + " | ".join(sep) + " |")
+    for row in rows:
+        lines.append("| " + " | ".join(str(c) for c in row) + " |")
+
+    display(Markdown("\n".join(lines)))
+
+
 
 def _value_to_latex(v: float, tolerance: float = 1e-6, max_denom: int = 100) -> str:
     """
@@ -129,8 +153,15 @@ def _value_to_latex(v: float, tolerance: float = 1e-6, max_denom: int = 100) -> 
         if sign == -1:
             sym = -sym
         return latex(sym)
+    
+    # 4. Multiples of pi
+    pi_frac = Fraction(abs_v / np.pi).limit_denominator(max_denom)
+    if abs(float(pi_frac) * np.pi - abs_v) < tolerance:
+        n, d = sign * pi_frac.numerator, pi_frac.denominator
+        num = r'\pi' if n == 1 else (r'-\pi' if n == -1 else rf'{n}\pi')
+        return rf'\frac{{{num}}}{{{d}}}' if d != 1 else num
 
-    # 4. Decimal fallback
+    # 5. Decimal fallback
     return f"{v:.6g}"
 
 

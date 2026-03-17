@@ -3,7 +3,7 @@ from scipy.constants import h, c
 from .params import LaserBeam, Telescope
 
 import numpy as np
-from qutip import *
+from qutip import Qobj
 import matplotlib.pyplot as plt
 from typing import Optional, List, Tuple, Dict
 from tqdm import tqdm
@@ -116,14 +116,7 @@ def rho_eigensystem(rho) -> Tuple[np.ndarray, List[Qobj]]:
     vecs  = vecs[:, order]
     return vals, [Qobj(vecs[:, k].reshape(-1, 1)) for k in range(len(vals))]
 
-def compose_abcd(*matrices: np.ndarray) -> np.ndarray:
-    """
-    Compose multiple ABCD matrices (right to left).
-    """
-    result = np.eye(2)
-    for M in reversed(matrices):
-        result = M @ result
-    return result
+
 
 def _fiber_jones(theta: float, delta: float) -> np.ndarray:
     """

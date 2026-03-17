@@ -964,7 +964,7 @@ def solve_ts(n, m, kind:Literal['cyclic', 'symmetric']="cyclic", theta: float = 
             valid = False
             if verbose:
                 niceprint(
-                    "⚠ **No-hit constraint is infeasible at this $\\theta$** — "
+                    "Warn: **No-hit constraint is infeasible at this $\\theta$** — "
                     "no TS state exists that also distinguishes the no-hit case. "
                     "Try a larger $\\theta$ or set `no_hit=False`."
                 )
@@ -1481,7 +1481,7 @@ def build_decoder(trajectories, n, theta, psi, no_hit_output=None, verbose=True)
             )
         traj_vecs['no_hit'] = (int(no_hit_output, 2), no_hit_v)
         if verbose:
-            niceprint(f"✓ No-hit state included as output `{no_hit_output}`.")
+            niceprint(f"$\\checkmark$ No-hit state included as output `{no_hit_output}`.")
     else:
         # Inform user post-hoc whether no-hit is available
         max_ov = max(abs(np.dot(no_hit_v.conj(), v)) for _, v in traj_vecs.values())
@@ -1500,7 +1500,7 @@ def build_decoder(trajectories, n, theta, psi, no_hit_output=None, verbose=True)
     max_cross = cross.max()
     if max_cross > 1e-4 and verbose:
         niceprint(
-            f"⚠ States not fully orthogonal (max off-diagonal overlap = {max_cross:.2e}). "
+            f"Warn: States not fully orthogonal (max off-diagonal overlap = {max_cross:.2e}). "
             "Verify theta is the correct interaction angle."
         )
 
@@ -1543,7 +1543,7 @@ def build_decoder(trajectories, n, theta, psi, no_hit_output=None, verbose=True)
     # ── Step 6: synthesize ───────────────────────────────────────────────────
     if verbose and n > 6:
         niceprint(
-            f"⚠ n={n}: decoder is a ${d}\\times{d}$ unitary — "
+            f"Warn: n={n}: decoder is a ${d}\\times{d}$ unitary — "
             "circuit synthesis via quantum Shannon decomposition is exact but "
             "produces a large number of gates."
         )
@@ -1638,6 +1638,720 @@ def build_ts_circuit(result, intercepted_qubits, theta_turns=None,
     circ.append(decoder_circuit)
 
     return circ
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stabilizer TS code checker
+# ──────────────────────────────────────────────────────────────────────────────
+
+_PAULI_1Q = {
+    'I': np.eye(2, dtype=complex),
+    'X': np.array([[0, 1], [1, 0]], dtype=complex),
+    'Y': np.array([[0, -1j], [1j, 0]], dtype=complex),
+    'Z': np.array([[1, 0], [0, -1]], dtype=complex),
+}
+
+
+def _stab_pauli_mat(s, n):
+    """
+    Parse a signed Pauli string '+XZIZ' or '-ZZXI' into a 2^n × 2^n matrix.
+    First character must be '+' or '-'; remaining n characters are I/X/Y/Z.
+    """
+    if s[0] not in ('+', '-'):
+        raise ValueError(f"Generator must start with '+' or '-', got: {s!r}")
+    sign = -1 if s[0] == '-' else 1
+    ops  = s[1:]
+    if len(ops) != n:
+        raise ValueError(f"Generator has {len(ops)} Pauli factors but n={n}")
+    mat = _PAULI_1Q[ops[0]]
+    for c in ops[1:]:
+        mat = np.kron(mat, _PAULI_1Q[c])
+    return sign * mat
+
+
+def _stab_code_basis(generators, n):
+    """
+    Find an orthonormal basis for the simultaneous +1 eigenspace of all generators.
+
+    The projector onto H_S is Π = ∏_i (I + s_i g_i) / 2 where s_i is the
+    sign encoded in each generator string (Mike & Ike §10.5).  We build Π
+    iteratively and extract its column space via eigendecomposition.
+    """
+    N  = 2 ** n
+    Pi = np.eye(N, dtype=complex)
+    for g in generators:
+        G  = _stab_pauli_mat(g, n)
+        Pi = Pi @ ((np.eye(N, dtype=complex) + G) / 2)
+    vals, vecs = np.linalg.eigh(Pi)
+    basis = [vecs[:, i] for i in range(N) if abs(vals[i] - 1.0) < 1e-8]
+    if not basis:
+        return []
+    Q, _ = np.linalg.qr(np.column_stack(basis))
+    return [Q[:, i] for i in range(Q.shape[1])]
+
+
+def _stab_Rz(theta):
+    """Single-qubit R_Z(θ) = exp(−i θ/2 · Z)."""
+    return np.array([[np.exp(-1j * theta / 2), 0],
+                     [0,  np.exp(+1j * theta / 2)]], dtype=complex)
+
+
+def _stab_R_pair(T, Tp, theta, n):
+    """
+    Build the orthogonality operator R^(T,T')(θ) = R†^(T) R^(T') as an
+    n-qubit matrix.  For each qubit j:
+      • j ∈ T  only  → R_Z(−θ)   (from the R†^(T) factor)
+      • j ∈ T' only  → R_Z(+θ)   (from the R^(T') factor)
+      • j ∈ both / neither → I
+    """
+    Ts, Tps = frozenset(T), frozenset(Tp)
+    ops = []
+    for j in range(n):
+        if   j in Ts  and j not in Tps: ops.append(_stab_Rz(-theta))
+        elif j in Tps and j not in Ts:  ops.append(_stab_Rz(+theta))
+        else:                           ops.append(_PAULI_1Q['I'])
+    mat = ops[0]
+    for op in ops[1:]:
+        mat = np.kron(mat, op)
+    return mat
+
+
+def _stab_projector(gen_mats, subset):
+    """
+    Build Π_V = ∏_{i ∈ subset} (I + g_i) / 2.
+
+    Each g_i is already a signed matrix (_stab_pauli_mat output), so its
+    +1 eigenspace is exactly the subspace V we want to project onto.
+    """
+    N  = gen_mats[0].shape[0]
+    Pi = np.eye(N, dtype=complex)
+    for i in subset:
+        Pi = Pi @ ((np.eye(N, dtype=complex) + gen_mats[i]) / 2)
+    return Pi
+
+
+def _make_stab_context(generators, n):
+    """
+    Precompute all code-independent quantities for a stabilizer code so they
+    can be reused across many check_stabilizer_ts calls in a search loop.
+
+    Returns
+    -------
+    dict with:
+        gen_mats : list of 2^n×2^n generator matrices
+        basis    : list of orthonormal code basis vectors
+        dim      : code space dimension
+    """
+    gen_mats = [_stab_pauli_mat(g, n) for g in generators]
+    basis    = _stab_code_basis(generators, n)
+    return {'gen_mats': gen_mats, 'basis': basis, 'dim': len(basis)}
+
+
+def check_stabilizer_ts(
+    generators,
+    trajectories,
+    theta,
+    n,
+    tol             = 1e-9,
+    max_subset_size = 2,
+    check_thm10     = True,
+    verbose         = True,
+    _ctx            = None,
+):
+    """
+    Check whether a stabilizer code is a TS code for a given trajectory set
+    by verifying two independent criteria from [PRA]:
+
+    KL criterion (Eq. 96)
+        ⟨ψ_i | R^(T,T')(θ) | ψ_j⟩ = δ_{T,T'} δ_{i,j}
+        for every pair of trajectories T, T' and every pair of code basis
+        states ψ_i, ψ_j.  This is both necessary and sufficient for H_S to
+        be a TS code.  It is checked directly on the code basis vectors.
+
+    Theorem 10 (sufficient condition, §V.C.1 of [PRA])
+        For every T ≠ T', there must exist a stabilizer element D ∈ S and a
+        subspace V ⊇ H_S such that {D, R^(T,T')}Π_V = 0.  V is the +1
+        eigenspace of a *subset* of the generators; the search tries subsets
+        of increasing size (1, 2, …, max_subset_size).  The CSS heuristic
+        (D from S_X, V from a single element of S_Z) is tried first via
+        size-1 subsets.
+
+    Parameters
+    ----------
+    generators : list[str]
+        Signed Pauli strings, e.g. ['+XXXX', '-ZIZI', '+XIXI'].
+        First character must be '+' or '-'; remaining n characters are I/X/Y/Z.
+    trajectories : dict[str, list[int]] | list[list[int]]
+        Trajectory set.  Either a dict mapping name → qubit indices (0-indexed)
+        or a plain list of qubit-index lists.
+    theta : float
+        Particle-sensor interaction angle in radians.
+    n : int
+        Number of sensor qubits.
+    tol : float
+        Numerical zero threshold (default 1e-9).
+    max_subset_size : int
+        Maximum number of generators used to define the subspace V in the
+        Theorem 10 search.  Size 1 is sufficient for all CSS cases proven in
+        the paper; increase to 2 or 3 only if size-1 fails and you suspect a
+        multi-generator witness exists.
+    check_thm10 : bool
+        If False, skip the Theorem 10 search entirely.  Useful in a fast
+        screening loop where you only want KL hits and will call the full
+        check on those hits separately.
+    verbose : bool
+        If True, print a formatted report via niceprint.
+    _ctx : dict | None
+        Optional precomputed context from _make_stab_context().  Pass this
+        when calling check_stabilizer_ts in a loop over many trajectory sets
+        on the same code — it avoids recomputing the code basis each time.
+
+    Returns
+    -------
+    dict with keys:
+        kl_pass        : bool  — True iff KL criterion holds for all pairs
+        thm10_pass     : bool  — True iff Theorem 10 witness found for all pairs
+        code_dim       : int   — dimension of the stabilizer code space
+        kl_matrix      : dict  — (ti, tpi) → dim×dim matrix of inner products
+        kl_violations  : list  — [(T_name, Tp_name, max_error), …]
+        thm10_witnesses: dict  — (T_name, Tp_name) → (D_str, [V_gen_strs])
+        thm10_failures : list  — [(T_name, Tp_name), …] where no witness found
+    """
+    # ── Parse trajectories ────────────────────────────────────────────────
+    if isinstance(trajectories, dict):
+        traj_names = list(trajectories.keys())
+        traj_sets  = [list(v) for v in trajectories.values()]
+    else:
+        traj_names = [str(i) for i in range(len(trajectories))]
+        traj_sets  = [list(t) for t in trajectories]
+    K = len(traj_sets)
+
+    # ── Generator matrices and code basis (reuse ctx if provided) ────────
+    if _ctx is not None:
+        gen_mats = _ctx['gen_mats']
+        basis    = _ctx['basis']
+        dim      = _ctx['dim']
+    else:
+        gen_mats = [_stab_pauli_mat(g, n) for g in generators]
+        basis    = _stab_code_basis(generators, n)
+        dim      = len(basis)
+    r = len(generators)
+    if dim == 0:
+        result = {
+            'kl_pass': False, 'thm10_pass': False,
+            'code_dim': 0, 'kl_matrix': {}, 'kl_violations': [],
+            'thm10_witnesses': {}, 'thm10_failures': [],
+            'error': 'Empty code space — generators may be inconsistent or overcomplete',
+        }
+        if verbose:
+            niceprint("**Error:** empty code space — check that generators commute "
+                      "and do not contain $-I^{\\otimes n}$.")
+        return result
+
+    # ── KL criterion ─────────────────────────────────────────────────────
+    # Eq. (96): ⟨ψ_i|R^(T,T')|ψ_j⟩ = δ_{T,T'} δ_{i,j}  ∀ T,T',i,j
+    kl_pass      = True
+    kl_violations = []
+    kl_matrix    = {}
+
+    for ti, T in enumerate(traj_sets):
+        for tpi, Tp in enumerate(traj_sets):
+            R = _stab_R_pair(T, Tp, theta, n)
+            M = np.array([[basis[i].conj() @ R @ basis[j]
+                           for j in range(dim)]
+                          for i in range(dim)])
+            kl_matrix[(ti, tpi)] = M
+            expected = np.eye(dim, dtype=complex) if ti == tpi else np.zeros((dim, dim), dtype=complex)
+            err = float(np.max(np.abs(M - expected)))
+            if err > tol:
+                kl_pass = False
+                kl_violations.append((traj_names[ti], traj_names[tpi], err))
+
+    # ── Theorem 10 ────────────────────────────────────────────────────────
+    # Candidate D operators: individual generators + pairwise products.
+    # Pairwise products are included because the stabilizer group is closed
+    # under multiplication, and witnesses sometimes require products.
+    if not check_thm10:
+        thm10_pass      = None   # not checked
+        thm10_witnesses = {}
+        thm10_failures  = []
+    else:
+        D_candidates = list(zip(generators, gen_mats))
+        for i, j in combinations(range(r), 2):
+            lbl  = f"({generators[i]})·({generators[j]})"
+            prod = gen_mats[i] @ gen_mats[j]
+            D_candidates.append((lbl, prod))
+
+        thm10_pass      = True
+        thm10_witnesses = {}
+        thm10_failures  = []
+
+        for ti in range(K):
+            for tpi in range(K):
+                if ti == tpi:
+                    continue
+                T, Tp = traj_sets[ti], traj_sets[tpi]
+                R     = _stab_R_pair(T, Tp, theta, n)
+
+                # Precompute anticommutators {D, R} for every candidate D
+                anticomms = {d_str: d_mat @ R + R @ d_mat
+                             for d_str, d_mat in D_candidates}
+
+                witness_found = False
+                for sz in range(1, min(max_subset_size, r) + 1):
+                    if witness_found:
+                        break
+                    for subset in combinations(range(r), sz):
+                        if witness_found:
+                            break
+                        PiV = _stab_projector(gen_mats, subset)
+                        for d_str, ac in anticomms.items():
+                            if np.max(np.abs(ac @ PiV)) < tol:
+                                v_gens = [generators[i] for i in subset]
+                                thm10_witnesses[(traj_names[ti], traj_names[tpi])] = (d_str, v_gens)
+                                witness_found = True
+                                break
+
+                if not witness_found:
+                    thm10_pass = False
+                    thm10_failures.append((traj_names[ti], traj_names[tpi]))
+
+    result = {
+        'kl_pass':         kl_pass,
+        'thm10_pass':      thm10_pass,
+        'code_dim':        dim,
+        'kl_matrix':       kl_matrix,
+        'kl_violations':   kl_violations,
+        'thm10_witnesses': thm10_witnesses,
+        'thm10_failures':  thm10_failures,
+    }
+
+    # ── Verbose report ────────────────────────────────────────────────────
+    if verbose:
+        kl_sym    = '✓' if kl_pass    else '✗'
+        t10_sym   = '✓' if thm10_pass else '✗'
+        theta_str = _frac_of_pi(theta)
+
+        niceprint(
+            f"**Stabilizer TS check** &nbsp;·&nbsp; "
+            f"$n={n}$, &nbsp; $\\theta = {theta_str}$, &nbsp; "
+            f"code dim $= {dim}$, &nbsp; {K} trajectories<br>"
+            f"**KL criterion (Eq. 96):** {kl_sym} &nbsp;&nbsp; "
+            f"**Theorem 10 (arxiv eq103, p24):** {t10_sym}"
+        )
+
+        # # KL matrix display
+        # header = "| | " + " | ".join(f"$T_{{{nm}}}$" for nm in traj_names) + " |"
+        # sep    = "|:---:|" + ":---:|" * K
+        # rows_  = [header, sep]
+        # for ti, tn in enumerate(traj_names):
+        #     cells = []
+        #     for tpi in range(K):
+        #         M   = kl_matrix[(ti, tpi)]
+        #         val = M[0, 0] if dim == 1 else np.trace(M) / dim
+        #         if abs(val.imag) < tol:
+        #             cells.append(f"${val.real:+.3f}$")
+        #         else:
+        #             cells.append(f"${val.real:+.3f}{val.imag:+.3f}i$")
+        #     rows_.append(f"| $T_{{{tn}}}$ | " + " | ".join(cells) + " |")
+        # niceprint("\n".join(rows_))
+        # niceprint("KL inner-product matrix $\\langle\\psi_i|R^{(T,T')}|\\psi_j\\rangle$ "
+        #           "(diagonal = 1 required, off-diagonal = 0 required)")
+
+        if kl_violations:
+            viol_strs = "; ".join(f"$({a},{b})$: err=${e:.2e}$"
+                                  for a, b, e in kl_violations)
+            niceprint(f"**KL violations:** {viol_strs}")
+
+        # # Theorem 10 witnesses
+        # if thm10_witnesses:
+        #     w_header = "| Pair $(T, T')$ | Witness $D$ | Subspace $V$ generators |"
+        #     w_sep    = "|:---:|:---|:---|"
+        #     w_rows   = [w_header, w_sep]
+        #     for (tn, tpn), (D_str, V_gens) in thm10_witnesses.items():
+        #         d_disp = f"`{D_str}`"
+        #         v_disp = ", ".join(f"`{g}`" for g in V_gens)
+        #         w_rows.append(f"| $({tn},\\,{tpn})$ | {d_disp} | {v_disp} |")
+        #     niceprint("\n".join(w_rows))
+
+        if thm10_failures:
+            fail_strs = ", ".join(f"$({a},{b})$" for a, b in thm10_failures)
+            niceprint(
+                f"**Theorem 10 failures** (no witness found within subset size "
+                f"{max_subset_size}): {fail_strs}. "
+                f"Try increasing `max_subset_size` or check KL directly."
+            )
+
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Trajectory set search over a fixed stabilizer code
+# ──────────────────────────────────────────────────────────────────────────────
+
+def search_ts_trajectories(
+    generators,
+    n,
+    theta,
+    traj_size,
+    set_size    = 4,
+    tol         = 1e-9,
+    require_overlap = True,
+    verbose     = True,
+):
+    """
+    Search for all trajectory sets of a given size that make a fixed stabilizer
+    code into a TS code, by checking the KL criterion (Eq. 96 of [PRA]).
+
+    The search proceeds in two stages chosen for speed:
+
+    Stage 1 — scalar cache
+        For a dim-1 code, KL reduces to checking one scalar per ordered pair:
+        ⟨ψ|R^(T,T')(θ)|ψ⟩ = δ_{T,T'}.  We precompute this scalar for every
+        ordered pair of size-traj_size subsets of [n], storing results in a
+        dict keyed by (T, T').  This is the only part that touches 2^n × 2^n
+        matrices.
+
+    Stage 2 — combinatorial check
+        We enumerate all C(candidates, set_size) candidate sets and check all
+        set_size² scalar lookups.  This is pure Python arithmetic with no
+        matrix operations, so it runs at millions of checks per second.
+
+    Parameters
+    ----------
+    generators : list[str]
+        Signed Pauli strings defining the stabilizer code (same format as
+        check_stabilizer_ts).
+    n : int
+        Number of sensor qubits.
+    theta : float
+        Particle-sensor interaction angle in radians.
+    traj_size : int
+        Number of qubits per trajectory (|T| = traj_size for all T in T).
+    set_size : int
+        Number of trajectories in the set to search for (default 4).
+    tol : float
+        Numerical zero threshold for KL check (default 1e-9).
+    require_overlap : bool
+        If True (default), skip candidate sets where some trajectory pair
+        shares no qubits — such pairs are trivially orthogonal and unlikely
+        to represent physically meaningful trajectory discrimination.
+    verbose : bool
+        If True, print progress and a summary via niceprint.
+
+    Returns
+    -------
+    hits : list of tuples
+        Each entry is a set_size-tuple of traj_size-tuples of qubit indices
+        (0-indexed), representing a valid trajectory set.  The trajectories
+        within each tuple are sorted, as are the tuples within the outer tuple.
+    ctx : dict
+        The precomputed context from _make_stab_context, so you can pass it
+        directly to check_stabilizer_ts for further analysis of hits.
+    """
+    import time
+    from itertools import combinations as _comb
+
+    ctx      = _make_stab_context(generators, n)
+    dim      = ctx['dim']
+    gen_mats = ctx['gen_mats']
+    basis    = ctx['basis']
+
+    if dim == 0:
+        if verbose:
+            niceprint("**Error:** empty code space — check generators.")
+        return [], ctx
+
+    if dim > 1:
+        # For multi-dimensional codes the KL matrix is dim×dim per pair.
+        # We still support this but the cache stores matrices, not scalars.
+        _scalar_mode = False
+    else:
+        _scalar_mode = True
+
+    # ── Stage 1: build scalar / matrix cache ─────────────────────────────
+    candidates = list(_comb(range(n), traj_size))
+    N_cand     = len(candidates)
+    N_pairs    = N_cand * N_cand
+
+    if verbose:
+        niceprint(
+            f"**Trajectory search** &nbsp;·&nbsp; "
+            f"$n={n}$, &nbsp; $|T|={traj_size}$, &nbsp; set size $={set_size}$, &nbsp; "
+            f"$\\theta={_frac_of_pi(theta)}$<br>"
+            f"Candidates: {N_cand} trajectories &nbsp;·&nbsp; "
+            f"Cache: {N_pairs} pairs &nbsp;·&nbsp; "
+            f"Sets to check: $\\binom{{{N_cand}}}{{{set_size}}}$"
+        )
+
+    t0 = time.time()
+    psi   = basis[0] if _scalar_mode else None
+    cache = {}
+
+    for T in candidates:
+        for Tp in candidates:
+            if T == Tp:
+                cache[(T, Tp)] = 1.0 + 0j if _scalar_mode else np.eye(dim, dtype=complex)
+                continue
+            R = _stab_R_pair(list(T), list(Tp), theta, n)
+            if _scalar_mode:
+                cache[(T, Tp)] = complex(psi.conj() @ R @ psi)
+            else:
+                B = np.column_stack(basis)
+                cache[(T, Tp)] = B.conj().T @ R @ B   # dim×dim matrix
+
+    t1 = time.time()
+
+    # ── Stage 2: combinatorial search ────────────────────────────────────
+    hits = []
+
+    for quad in _comb(candidates, set_size):
+        # Optional: skip if any pair shares no qubits
+        if require_overlap:
+            if any(not (set(T) & set(Tp))
+                   for i, T in enumerate(quad)
+                   for Tp in quad[i+1:]):
+                continue
+
+        # Check all set_size² KL entries
+        ok = True
+        for T in quad:
+            for Tp in quad:
+                expected = 1.0 if T == Tp else 0.0
+                if _scalar_mode:
+                    if abs(cache[(T, Tp)] - expected) > tol:
+                        ok = False
+                        break
+                else:
+                    expected_mat = np.eye(dim) if T == Tp else np.zeros((dim, dim))
+                    if np.max(np.abs(cache[(T, Tp)] - expected_mat)) > tol:
+                        ok = False
+                        break
+            if not ok:
+                break
+        if ok:
+            hits.append(quad)
+
+    t2 = time.time()
+
+    if verbose:
+        niceprint(
+            f"Cache built in ${t1-t0:.2f} s$ &nbsp;·&nbsp; "
+            f"Search completed in ${t2-t1:.2f} s$ <br>"
+            f"**Found {len(hits)} valid trajectory sets**"
+        )
+
+    return hits, ctx
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Syndrome decoder
+# ──────────────────────────────────────────────────────────────────────────────
+
+def find_syndrome_paulis(psi, trajectories, theta, n, tol=1e-8):
+    """
+    Find the smallest set of multi-qubit Pauli observables that uniquely
+    identify every trajectory via a single round of syndrome measurement.
+
+    After a trajectory T acts on the TS state |ψ⟩, the output R^(T)(θ)|ψ⟩
+    must be a simultaneous eigenstate of every chosen Pauli with eigenvalue ±1,
+    and the resulting bit pattern must be unique across all trajectories.  This
+    is only possible when θ = π/2 (or other Clifford-equivalent angles) because
+    R_Z(π/2) maps Pauli eigenstates to Pauli eigenstates.
+
+    The algorithm exhaustively searches all n-qubit Pauli strings, collects
+    those that are deterministic (eigenvalue exactly ±1) on all output states,
+    then finds the smallest subset that produces a distinct bitstring per
+    trajectory.  For the C4 subcode at θ = π/2 the answer is always two Paulis
+    (one ancilla qubit each), giving a 2-bit syndrome that identifies 4
+    trajectories.
+
+    Parameters
+    ----------
+    psi : np.ndarray, shape (2^n,)
+        The TS state vector.
+    trajectories : dict[str, list[int]]
+        Trajectory set in the same format as check_stabilizer_ts.
+    theta : float
+        Particle-sensor interaction angle in radians.  Must equal π/2 for
+        syndrome measurement to be possible; the function returns None if no
+        deterministic Paulis exist.
+    n : int
+        Number of sensor qubits.
+    tol : float
+        Numerical zero threshold (default 1e-8).
+
+    Returns
+    -------
+    paulis : list[str] | None
+        Minimal list of n-character Pauli strings (e.g. ['IXIY', 'XIYI']).
+        None if no distinguishing set exists (e.g. θ ≠ π/2).
+    syndrome_map : dict[str, str] | None
+        Maps measurement bitstring → trajectory name, where bit i is '0' if
+        the i-th Pauli gives eigenvalue +1, '1' if −1.
+        Example: {'00': 'T3', '01': 'T4', '10': 'T2', '11': 'T1'}.
+    """
+    from itertools import product as _iprod, combinations as _comb
+
+    _PM = {
+        'I': np.eye(2, dtype=complex),
+        'X': np.array([[0,1],[1,0]], dtype=complex),
+        'Y': np.array([[0,-1j],[1j,0]], dtype=complex),
+        'Z': np.array([[1,0],[0,-1]], dtype=complex),
+    }
+
+    def _kn(ops):
+        m = ops[0]
+        for op in ops[1:]: m = np.kron(m, op)
+        return m
+
+    def _Rz(t): return np.array([[np.exp(-1j*t/2),0],[0,np.exp(1j*t/2)]], dtype=complex)
+
+    traj_names = list(trajectories.keys())
+    traj_sets  = [list(v) for v in trajectories.values()]
+    K = len(traj_sets)
+
+    # Normalise psi to a flat numpy array (also accepts QuTiP Qobj)
+    try:
+        import qutip as _qt
+        if isinstance(psi, _qt.Qobj):
+            psi = psi.full().flatten()
+    except ImportError:
+        pass
+    psi = np.asarray(psi, dtype=complex).flatten()
+
+    # Compute output states R^(T)|ψ⟩ for each trajectory
+    outputs = {}
+    for name, T in zip(traj_names, traj_sets):
+        ops = [_Rz(theta) if j in T else np.eye(2, dtype=complex) for j in range(n)]
+        outputs[name] = _kn(ops) @ psi
+
+    # Find all n-qubit Paulis that give eigenvalue ±1 on every output state
+    # and differ across at least two trajectories
+    good = []
+    for combo in _iprod('IXYZ', repeat=n):
+        label = ''.join(combo)
+        if label == 'I' * n:
+            continue
+        P = _kn([_PM[c] for c in label])
+        evals, det = [], True
+        for nm in traj_names:
+            ev = complex(outputs[nm].conj() @ P @ outputs[nm])
+            if abs(abs(ev) - 1.0) > tol:
+                det = False
+                break
+            evals.append(int(round(ev.real)))
+        if det and len(set(evals)) > 1:
+            good.append((label, evals))
+
+    if not good:
+        return None, None   # θ is not Clifford-compatible
+
+    # Find the smallest subset of good Paulis that uniquely labels all K trajectories
+    for size in range(1, K):
+        for chosen in _comb(range(len(good)), size):
+            patterns = [tuple(good[i][1][k] for i in chosen) for k in range(K)]
+            if len(set(patterns)) == K:
+                paulis       = [good[i][0] for i in chosen]
+                syndrome_map = {
+                    ''.join('0' if good[i][1][k] == 1 else '1' for i in chosen): traj_names[k]
+                    for k in range(K)
+                }
+                return paulis, syndrome_map
+
+    return None, None
+
+
+def decode_syndrome(psi, trajectories, theta, n, paulis=None, syndrome_map=None):
+    """
+    Build the syndrome measurement sub-circuit for a stabilizer TS code.
+
+    This is an alternative to the unitary decoder returned by result.decode().
+    Instead of rotating the entire n-qubit state into a computational basis,
+    it measures k ancilla qubits (one per syndrome bit) and reads the trajectory
+    directly from the k-bit measurement result.
+
+    The circuit structure for measuring a multi-qubit Pauli P = P_0 ⊗ … ⊗ P_{n-1}
+    with ancilla qubit a follows Figure 10.13 of Nielsen & Chuang (§10.5.5):
+
+        a: |0⟩ ── H ── [C-P_j for each j] ── H ── Measure
+        q_j: ─────────── target of C-P_j ────────────────
+
+    Gate translations:
+        P_j = X → CX(a, q_j)
+        P_j = Z → CZ(a, q_j)
+        P_j = Y → Sdg(q_j) · CX(a, q_j) · S(q_j)
+        P_j = I → (nothing)
+
+    Parameters
+    ----------
+    psi : np.ndarray, shape (2^n,)
+        The prepared TS state vector (from result.prepare).
+    trajectories : dict[str, list[int]]
+        Trajectory set in the same format as check_stabilizer_ts.
+    theta : float
+        Particle-sensor interaction angle in radians.  Must equal π/2.
+    n : int
+        Number of sensor qubits.
+    paulis : list[str] | None
+        Syndrome Pauli strings from find_syndrome_paulis.  If None, they are
+        computed automatically.
+    syndrome_map : dict[str, str] | None
+        Syndrome bitstring → trajectory name map.  If None, computed automatically.
+
+    Returns
+    -------
+    circ : pytket.circuit.Circuit
+        Syndrome measurement circuit.  Qubit registers:
+            q[0..n-1]   — code qubits (connect to your prep circuit)
+            anc[0..k-1] — ancilla qubits (start in |0⟩)
+        Bit register:
+            s[0..k-1]   — syndrome measurement outcomes.
+    syndrome_map : dict[str, str]
+        Maps syndrome bitstring (e.g. '01') → trajectory name (e.g. 'T4').
+    paulis : list[str]
+        The Pauli observables being measured (for documentation / inspection).
+
+    Raises
+    ------
+    ValueError
+        If no deterministic distinguishing Paulis exist, which occurs when θ ≠ π/2.
+        At other angles, use result.decode() (the unitary decoder) instead.
+    """
+    from pytket.circuit import Circuit as _Circ, Qubit as _Q, Bit as _B
+
+    # Find syndrome Paulis if not provided
+    if paulis is None or syndrome_map is None:
+        paulis, syndrome_map = find_syndrome_paulis(psi, trajectories, theta, n)
+        if paulis is None:
+            raise ValueError(
+                f"No deterministic syndrome Paulis found at θ = {theta:.4f} rad "
+                f"({theta/np.pi:.4f}π).  The syndrome decoder requires θ = π/2.  "
+                f"For other angles, use result.decode() (the unitary decoder)."
+            )
+
+    n_anc = len(paulis)
+    circ  = _Circ()
+    for i in range(n):     circ.add_qubit(_Q('q', i))
+    for i in range(n_anc): circ.add_qubit(_Q('anc', i))
+    for i in range(n_anc): circ.add_bit(_B('s', i))
+
+    for ai, pauli_str in enumerate(paulis):
+        anc = _Q('anc', ai)
+        circ.H(anc)
+        for j, p in enumerate(pauli_str):
+            q = _Q('q', j)
+            if   p == 'X': circ.CX(anc, q)
+            elif p == 'Z': circ.CZ(anc, q)
+            elif p == 'Y': circ.Sdg(q); circ.CX(anc, q); circ.S(q)
+            # I: no gate
+        circ.H(anc)
+        circ.Measure(anc, _B('s', ai))
+
+    return circ, syndrome_map, paulis
+
+
 
 
 

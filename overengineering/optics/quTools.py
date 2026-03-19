@@ -63,7 +63,7 @@ def _style_ax(ax, title='', xlabel='', ylabel=''):
 
 class TomoResult:
     """
-    Return value from ``qapp.tomo1q()`` and ``qapp.tomo2q()``.
+    Return value from ``quED.tomo1q()`` and ``quED.tomo2q()``.
 
     Attributes
     ----------
@@ -200,7 +200,7 @@ class TomoResult:
 
 class G2Result:
     """
-    Return value from ``qapp.stats.g2()``.
+    Return value from ``quED.stats.g2()``.
 
     ``value()``   - (mean, std)
     ``summary()`` - formatted niceprint output
@@ -278,7 +278,7 @@ class G2Result:
 
 class CHSHResult:
     """
-    Return value from ``qapp.CHSH()``.
+    Return value from ``quED.CHSH()``.
 
     ``value()``        - (S, sigma_S)
     ``summary()``      - formatted niceprint output with per-correlator table

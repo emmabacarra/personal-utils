@@ -148,11 +148,33 @@ def _value_to_latex(v: float, tolerance: float = 1e-6, max_denom: int = 100) -> 
     v2 = abs_v * abs_v
     frac2 = Fraction(v2).limit_denominator(max_denom)
     if abs(float(frac2) - v2) < tolerance and frac2 > 0:
-        sym = sympy.sqrt(sympy.Rational(frac2.numerator, frac2.denominator))
-        sym = sympy.simplify(sym)
-        if sign == -1:
-            sym = -sym
-        return latex(sym)
+        p, q = frac2.numerator, frac2.denominator   # v = sqrt(p/q), p,q coprime
+        sign_str = '-' if sign == -1 else ''
+
+        k_p = int(round(p ** 0.5))
+        k_q = int(round(q ** 0.5))
+        p_sq = (k_p * k_p == p)
+        q_sq = (k_q * k_q == q)
+
+        if p_sq and q_sq:
+            # both perfect squares → pure rational (should be caught by step 2)
+            num = sign * k_p
+            return rf"\frac{{{num}}}{{{k_q}}}" if k_q != 1 else str(num)
+        elif p_sq and not q_sq:
+            # v = k_p / sqrt(q)  →  \frac{k_p}{\sqrt{q}}
+            if k_p == 1:
+                return rf"{sign_str}\frac{{1}}{{\sqrt{{{q}}}}}"
+            else:
+                return rf"{sign_str}\frac{{{k_p}}}{{\sqrt{{{q}}}}}"
+        elif not p_sq and q_sq:
+            # v = sqrt(p) / k_q  →  \sqrt{p}  or  \frac{\sqrt{p}}{k_q}
+            if k_q == 1:
+                return rf"{sign_str}\sqrt{{{p}}}"
+            else:
+                return rf"{sign_str}\frac{{\sqrt{{{p}}}}}{{{k_q}}}"
+        else:
+            # neither square  →  \frac{\sqrt{p}}{\sqrt{q}}
+            return rf"{sign_str}\frac{{\sqrt{{{p}}}}}{{\sqrt{{{q}}}}}"
     
     # 4. Multiples of pi
     pi_frac = Fraction(abs_v / np.pi).limit_denominator(max_denom)

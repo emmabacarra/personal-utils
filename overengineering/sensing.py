@@ -1,3 +1,4 @@
+# COLLAPSE ALL: CTRL K + CTRL 0
 from .general import *
 
 import numpy as np

@@ -1,5 +1,5 @@
 Install as a package: 
-`pip install -e [full path to downloaded personal-utils folder]`
+`pip install git+https://github.com/emmabacarra/personal-utils.git`
 
 Import:
 `import overengineering`

@@ -1,5 +1,5 @@
 Install as a package: 
-`pip install git+https://github.com/emmabacarra/personal-utils.git`
+```pip install git+https://github.com/emmabacarra/personal-utils.git```
 
 Import:
 `import overengineering`

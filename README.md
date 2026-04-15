@@ -1,4 +1,4 @@
-# orenge
+# 🍊 orenge
 
 Short for "overengineering"! This is my personal utility package for quantum computing and information. Built for use in Jupyter notebooks.
 

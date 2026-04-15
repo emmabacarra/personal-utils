@@ -30,8 +30,8 @@ dev = [
     "matplotlib",
 ]
 
-[tool.setuptools]
-packages = ["overengineering"]
+[tool.setuptools.packages.find]
+where = ["."]
 
 [tool.setuptools.package-data]
 overengineering = ["*.py"]

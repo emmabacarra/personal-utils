@@ -3,3 +3,4 @@ depreciated/
 __pycache__/
 *.pyc
 *.pyo
+*.ini

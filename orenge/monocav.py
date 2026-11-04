@@ -3,10 +3,25 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
+from scipy.integrate import quad
+from scipy.special import jn_zeros, jv
+
 
 PTC10_COLS = ("heater", "thermistor", "outloop", "ambient")
 COLORS = ["mediumvioletred", "deepskyblue", "darkorange", "forestgreen"]
 CH_COLORS = {"thermistor": COLORS[0], "outloop": COLORS[1], "heater": COLORS[2], "ambient": COLORS[3]}
+
+C_LIGHT = 2.998e8                                                  # m/s
+LAM = 729e-9                                                       # m
+NU_LASER = C_LIGHT / LAM                                           # Hz, optical frequency at 729 nm
+N_SILICA = 1.4547                                                  # refractive index of fused silica at 729 nm
+DNDT = 8.7839e-6                                                   # 1/K, Leviton & Frey (2008), interpolated to 729 nm, 300 K
+BETA = DNDT / N_SILICA                                             # 1/K, thermorefractive coefficient
+KB = 1.380649e-23                                                  # J/K
+L_CAV = 9.5e-3                                                     # m, cavity length
+R_CAV = 12.5e-3                                                    # m, cavity radius
+CP_VOL = 746.0 * 2202.0                                            # J/(m^3 K), volumetric heat capacity
+KAPPA = 1.38                                                       # W/(m K)
 
 
 # ------------------------------------------------------------------ spectra
@@ -19,6 +34,7 @@ def psd_fft(y, fs):
     if y.size % 2 == 0:
         S[-1] /= 2.0                                               # Nyquist bin is not doubled
     return np.fft.rfftfreq(y.size, 1.0 / fs), S                    # Hz, units^2/Hz
+
 
 
 def log_bin(x, S, n_per_dec=10):
@@ -61,14 +77,13 @@ def load_ptc10(path, dt=None, cols=PTC10_COLS, n_skip=0, n_per_dec=10, rename=No
     fs = 1.0 / dt                                                  # Hz
     f = psd_fft(y[cols[0]], fs)[0]                                 # Hz
     keep = f > 0                                                   # drop DC
-    omega = 2.0 * np.pi * f[keep]                                  # rad/s
     S = {c: psd_fft(y[c], fs)[1][keep] for c in cols}              # units^2/Hz
-    Sb = {c: log_bin(omega, S[c], n_per_dec) for c in cols}        # (omega_bin rad/s, S_bin units^2/Hz)
-    return {"path": path, "dt": dt, "N": N, "t": n * dt, "y": y, "units": units, "f": f[keep], "omega": omega, "S": S, "Sb": Sb}
+    Sb = {c: log_bin(f[keep], S[c], n_per_dec) for c in cols}      # (f_bin Hz, S_bin units^2/Hz)
+    return {"path": path, "dt": dt, "N": N, "t": n * dt, "y": y, "units": units, "f": f[keep], "S": S, "Sb": Sb}
 
 
 def psd_ratio(log, num, den):
-    return log["Sb"][num][0], log["Sb"][num][1] / log["Sb"][den][1]   # rad/s, dimensionless
+    return log["Sb"][num][0], log["Sb"][num][1] / log["Sb"][den][1]   # Hz, dimensionless
 
 
 # ------------------------------------------------------------------ Allan deviation
@@ -105,18 +120,51 @@ def S_Tcav(f, tau, sigma=1e-3, f_c=0.1):
     return S_Tcan(f, sigma, f_c) * cavity_filter(2.0 * np.pi * f, tau)   # K^2/Hz
 
 
+# ------------------------------------------------------------------ frequency noise
+def S_nu_env(S_T):
+    return (NU_LASER * BETA) ** 2 * S_T                            # Hz^2/Hz, from S_T in K^2/Hz
+ 
+ 
+def K_n(a_n, R, r0):
+    integrand = lambda xi: jv(0, a_n * xi) * np.exp(-((R / r0) * xi) ** 2) * xi
+    return quad(integrand, 0, 1, epsabs=1e-12, epsrel=1e-10)[0]    # dimensionless
+ 
+ 
+def Sz_hom(f, T0, H, R, r0, Cp, kappa, beta, N_modes=400):
+    omega = 2.0 * np.pi * np.asarray(f, dtype=float)               # rad/s
+    a = jn_zeros(1, N_modes)                                       # dimensionless, zeros of J_1
+    k = a / R                                                      # 1/m
+    K = np.array([K_n(a_n, R, r0) for a_n in a])                   # dimensionless
+    J0 = jv(0, a)                                                  # dimensionless
+    prefactor = (16.0 / np.pi) * (KB * T0 ** 2) * (H * R ** 2 / r0 ** 4) * (kappa * beta ** 2) / Cp ** 2   # m^4/s
+    denominator = omega[..., np.newaxis] ** 2 + (kappa / Cp) ** 2 * k ** 4    # 1/s^2
+    return prefactor * np.sum((k ** 2 / J0 ** 2) * K ** 2 / denominator, axis=-1)   # m^2/Hz
+ 
+ 
+def Sdv_over_v(f, L_cavity, T0, H, R, r0, Cp, kappa, beta, N_modes=400):
+    return Sz_hom(f, T0, H, R, r0, Cp, kappa, beta, N_modes) / L_cavity ** 2   # 1/Hz
+ 
+ 
+def S_nu_intrinsic(f, T0, r0, L_cavity=L_CAV, R=R_CAV, Cp=CP_VOL, kappa=KAPPA, beta=BETA, N_modes=400):
+    return NU_LASER ** 2 * Sdv_over_v(f, L_cavity, T0, L_cavity, R, r0, Cp, kappa, beta, N_modes)   # Hz^2/Hz
+
+
 # ------------------------------------------------------------------ plots
 def plot_psd(log, chans=("thermistor", "outloop", "ambient"), ref="ambient", colors=CH_COLORS):
     fig, ax = plt.subplots(figsize=(9, 4))
+    ax_ratio = ax.twinx()
     for c in chans:
-        wb, Sb = log["Sb"][c]
-        ax.loglog(log["omega"], log["S"][c], color=colors[c], alpha=0.15, linewidth=0.5)
-        ax.loglog(wb, Sb, color=colors[c], linewidth=1.5, label=f"{c}")
+        fb, Sb = log["Sb"][c]                                      # Hz, K^2/Hz
+        ax.loglog(log["f"], log["S"][c], color=colors[c], alpha=0.15, linewidth=0.5)
+        ax.loglog(fb, Sb, color=colors[c], linewidth=1.5, label=f"{c}")
         if ref is not None and c != ref:
-            ax.loglog(*psd_ratio(log, c, ref), color=colors[c], linestyle="--", linewidth=1.5, label=fr"{c} / {ref} ($S_{{\mathrm{{{c}}}}}/S_{{\mathrm{{{ref}}}}}$)")
-    ax.set_xlabel(r"angular frequency $\omega = 2\pi f$ (rad/s)")
-    ax.set_ylabel("thermal noise PSD (K$^2$/Hz)")
-    ax.legend(loc="lower left", fontsize=8)
+            ax_ratio.loglog(*psd_ratio(log, c, ref), color=colors[c], linestyle="--", linewidth=1.5, label=fr"{c} / {ref} ($S_{{\mathrm{{{c}}}}}/S_{{\mathrm{{{ref}}}}}$)")
+    ax.set_xlabel(r"frequency $f$ (Hz)")
+    ax.set_ylabel("temperature noise PSD (K$^2$/Hz)")
+    ax_ratio.set_ylabel("PSD ratio (dimensionless)")
+    handles = ax.get_legend_handles_labels()
+    handles_ratio = ax_ratio.get_legend_handles_labels()
+    ax.legend(handles[0] + handles_ratio[0], handles[1] + handles_ratio[1], loc="lower left", fontsize=8)
     fig.tight_layout(); fig.show()
     return fig, ax
 
@@ -125,9 +173,9 @@ def plot_ratios(log, pairs=(("thermistor", "outloop"), ("thermistor", "ambient")
     fig, ax = plt.subplots(figsize=(7, 5))
     for num, den in pairs:
         ax.loglog(*psd_ratio(log, num, den), color=colors[den], linewidth=2, label=fr"{num} / {den} ($S_{{\mathrm{{{num}}}}}/S_{{\mathrm{{{den}}}}}$)")
-    ax.set_xlim(log["omega"][0], log["omega"][-1])
-    ax.set_xlabel(r"angular frequency $\omega = 2\pi f$ (rad/s)")
-    ax.set_ylabel("PSD ratio")
+    ax.set_xlim(log["f"][0], log["f"][-1])
+    ax.set_xlabel(r"frequency $f$ (Hz)")
+    ax.set_ylabel("PSD ratio (dimensionless)")
     ax.set_title("temperature noise ratios")
     ax.legend(fontsize=8)
     fig.tight_layout(); fig.show()
@@ -149,18 +197,37 @@ def plot_adev(log, chans=("ambient", "outloop", "thermistor"), n_points=60, colo
 
 
 def plot_can_cavity(log, tau, can_col="outloop", sigma=1e-3, f_c=0.1, f=np.logspace(-4, 4, 400)):
-    omega_th = 2.0 * np.pi * f                                     # rad/s
-    wb, Sb = log["Sb"][can_col]                                    # rad/s, K^2/Hz
+    fb, Sb = log["Sb"][can_col]                                    # Hz, K^2/Hz
+    f_corner = 1.0 / (2.0 * np.pi * tau)                           # Hz
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.loglog(log["omega"], log["S"][can_col], color="gray", alpha=0.25, linewidth=0.8, label=f"{can_col} data (raw)", zorder=1)
-    ax.loglog(omega_th, S_Tcan(f, sigma, f_c), color="forestgreen", linewidth=2, label=fr"can, simulation ($f_c$ = {f_c:.2g} Hz)", zorder=3)
-    ax.loglog(omega_th, S_Tcav(f, tau, sigma, f_c), color="magenta", linewidth=2, label="cavity, simulation", zorder=2)
-    ax.loglog(wb, Sb, color="forestgreen", linestyle="--", linewidth=2, label="can, measured", zorder=3)
-    ax.loglog(wb, Sb * cavity_filter(wb, tau), color="magenta", linestyle="--", linewidth=2, label="cavity, estimate", zorder=2)
-    ax.axvline(1.0 / tau, color="magenta", linestyle=":", linewidth=1.5, alpha=0.4, label=fr"simulated $1/\tau$ = {1.0/tau:.2g} rad/s", zorder=2)
-    ax.set_xlabel(r"angular frequency $\omega = 2\pi f$ (rad/s)")
-    ax.set_ylabel(r"$S_T(\omega)$ (K$^2$/Hz)")
+    ax.loglog(log["f"], log["S"][can_col], color="gray", alpha=0.25, linewidth=0.8, label=f"{can_col} data (raw)", zorder=1)
+    ax.loglog(f, S_Tcan(f, sigma, f_c), color="forestgreen", linewidth=2, label=fr"can, simulation ($f_c$ = {f_c:.2g} Hz)", zorder=3)
+    ax.loglog(f, S_Tcav(f, tau, sigma, f_c), color="magenta", linewidth=2, label="cavity, simulation", zorder=2)
+    ax.loglog(fb, Sb, color="forestgreen", linestyle="--", linewidth=2, label="can, measured", zorder=3)
+    ax.loglog(fb, Sb * cavity_filter(2.0 * np.pi * fb, tau), color="magenta", linestyle="--", linewidth=2, label="cavity, estimate", zorder=2)
+    ax.axvline(f_corner, color="magenta", linestyle=":", linewidth=1.5, alpha=0.4, label=fr"simulated $1/(2\pi\tau)$ = {f_corner:.2g} Hz", zorder=2)
+    ax.set_xlabel(r"frequency $f$ (Hz)")
+    ax.set_ylabel(r"$S_T(f)$ (K$^2$/Hz)")
     ax.set_title("temperature noise: simulation vs data")
     ax.legend(fontsize=7)
     fig.tight_layout(); fig.show()
     return fig, ax
+
+
+def plot_freq_noise(tau, r0, T0=300, sigma=1e-3, f_c=0.1, f=np.logspace(-4, 4, 400)):
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.loglog(f, S_nu_env(S_Tcav(f, tau, sigma, f_c)), color="magenta", linewidth=2, label="environmental thermal noise")
+    ax.loglog(f, S_nu_intrinsic(f, T0, r0), color="deepskyblue", linewidth=2, label="intrinsic thermorefractive noise")
+    ax.axhline(1.0, color="black", linestyle="--", linewidth=1.5, label=r"1 Hz$^2$/Hz")
+    ax.axvline(100.0, color="gray", linestyle=":", linewidth=1.5, label="100 Hz")
+    ax.set_xlabel(r"frequency $f$ (Hz)")
+    ax.set_ylabel(r"$S_\nu(f)$ (Hz$^2$/Hz)")
+    ax.set_title(f"cavity frequency noise at {T0:g} K")
+    ax.legend(fontsize=7)
+    fig.tight_layout(); fig.show()
+    return fig, ax
+
+
+
+
+

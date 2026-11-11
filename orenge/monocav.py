@@ -46,8 +46,21 @@ def log_bin(x, S, n_per_dec=10):
     return xb, Sb
 
 
+def extrapolate_psd(fb, Sb, f0, fit_dec=1.0, f_to=1e4, n_per_dec=10):
+    win = (fb >= f0 / 10 ** fit_dec) & (fb < f0)                   # fit window: fit_dec decades just below f0
+    if np.count_nonzero(win) < 2:
+        raise ValueError(f"need >= 2 binned points in [{f0 / 10 ** fit_dec:.3g}, {f0:.3g}) Hz to extrapolate; widen extpol_fit_dec or lower extpol_from_Hz")
+    p = np.polyfit(np.log10(fb[win]), np.log10(Sb[win]), 1)        # log10 S = p[0]*log10 f + p[1]  (power law S = A f^alpha)
+    f_ext = 10 ** np.arange(np.log10(f0), np.log10(f_to) + 0.5 / n_per_dec, 1.0 / n_per_dec)   # Hz, log grid f0 -> f_to
+    keep = fb < f0                                                 # measured bins kept below f0
+    f_out = np.concatenate([fb[keep], f_ext])                      # Hz
+    S_out = np.concatenate([Sb[keep], 10 ** np.polyval(p, np.log10(f_ext))])   # units^2/Hz
+    return f_out, S_out, p                                         # p[0] = power-law exponent alpha
+
+
 # ------------------------------------------------------------------ PTC10 log
-def load_ptc10(path, dt=None, cols=PTC10_COLS, n_skip=0, n_per_dec=10, rename=None, **read_kw):
+def load_ptc10(path, dt=None, cols=PTC10_COLS, n_skip=0, n_per_dec=10, rename=None,
+               extpol_from_Hz=None, extpol_fit_dec=1.0, extpol_to_Hz=1e4, **read_kw):
     df = pd.read_csv(path, sep=None, engine="python", **read_kw)   # read_kw: e.g. skiprows=, comment=
     units = {}
     heads = {}
@@ -79,7 +92,15 @@ def load_ptc10(path, dt=None, cols=PTC10_COLS, n_skip=0, n_per_dec=10, rename=No
     keep = f > 0                                                   # drop DC
     S = {c: psd_fft(y[c], fs)[1][keep] for c in cols}              # units^2/Hz
     Sb = {c: log_bin(f[keep], S[c], n_per_dec) for c in cols}      # (f_bin Hz, S_bin units^2/Hz)
-    return {"path": path, "dt": dt, "N": N, "t": n * dt, "y": y, "units": units, "f": f[keep], "S": S, "Sb": Sb}
+    Sb_meas = Sb                                                   # binned measured PSD, never extrapolated
+    extpol = None
+    if extpol_from_Hz is not None:
+        f0 = float(extpol_from_Hz)                                 # Hz
+        out = {c: extrapolate_psd(*Sb[c], f0, extpol_fit_dec, extpol_to_Hz, n_per_dec) for c in cols}
+        Sb = {c: (out[c][0], out[c][1]) for c in cols}             # measured below f0 + power law above f0
+        extpol = {"from_Hz": f0, "to_Hz": extpol_to_Hz, "fit_dec": extpol_fit_dec, "alpha": {c: out[c][2][0] for c in cols}}
+    return {"path": path, "dt": dt, "N": N, "t": n * dt, "y": y, "units": units, "f": f[keep], "S": S,
+            "Sb": Sb, "Sb_meas": Sb_meas, "extpol": extpol}
 
 
 def psd_ratio(log, num, den):
@@ -150,6 +171,12 @@ def S_nu_intrinsic(f, T0, r0, L_cavity=L_CAV, R=R_CAV, Cp=CP_VOL, kappa=KAPPA, b
 
 
 # ------------------------------------------------------------------ plots
+def _mark_extpol(ax, log):
+    ext = log.get("extpol")
+    if ext is not None:
+        ax.axvline(ext["from_Hz"], color="gray", linestyle="--", linewidth=1.0, alpha=0.6,
+                   label=fr"power-law extrapolation above {ext['from_Hz']:.3g} Hz")
+
 def plot_psd(log, chans=("thermistor", "outloop", "ambient"), ref="ambient", colors=CH_COLORS):
     fig, ax = plt.subplots(figsize=(9, 4))
     ax_ratio = ax.twinx()
@@ -159,6 +186,7 @@ def plot_psd(log, chans=("thermistor", "outloop", "ambient"), ref="ambient", col
         ax.loglog(fb, Sb, color=colors[c], linewidth=1.5, label=f"{c}")
         if ref is not None and c != ref:
             ax_ratio.loglog(*psd_ratio(log, c, ref), color=colors[c], linestyle="--", linewidth=1.5, label=fr"{c} / {ref} ($S_{{\mathrm{{{c}}}}}/S_{{\mathrm{{{ref}}}}}$)")
+    _mark_extpol(ax, log)
     ax.set_xlabel(r"frequency $f$ (Hz)")
     ax.set_ylabel("temperature noise PSD (K$^2$/Hz)")
     ax_ratio.set_ylabel("PSD ratio (dimensionless)")
@@ -173,7 +201,9 @@ def plot_ratios(log, pairs=(("thermistor", "outloop"), ("thermistor", "ambient")
     fig, ax = plt.subplots(figsize=(7, 5))
     for num, den in pairs:
         ax.loglog(*psd_ratio(log, num, den), color=colors[den], linewidth=2, label=fr"{num} / {den} ($S_{{\mathrm{{{num}}}}}/S_{{\mathrm{{{den}}}}}$)")
-    ax.set_xlim(log["f"][0], log["f"][-1])
+    fb = log["Sb"][pairs[0][0]][0]                                 # Hz, includes extrapolated range
+    ax.set_xlim(min(log["f"][0], fb[0]), max(log["f"][-1], fb[-1]))
+    _mark_extpol(ax, log)
     ax.set_xlabel(r"frequency $f$ (Hz)")
     ax.set_ylabel("PSD ratio (dimensionless)")
     ax.set_title("temperature noise ratios")
@@ -196,36 +226,29 @@ def plot_adev(log, chans=("ambient", "outloop", "thermistor"), n_points=60, colo
     return fig, ax
 
 
-def plot_can_cavity(log, tau, can_col="outloop", sigma=1e-3, f_c=0.1, f=np.logspace(-4, 4, 400)):
-    fb, Sb = log["Sb"][can_col]                                    # Hz, K^2/Hz
+def plot_can_cavity(log, tau, can_col="thermistor", outloop_col="outloop", sigma=1e-3, f_c=0.1, f=np.logspace(-4, 4, 400)):
     f_corner = 1.0 / (2.0 * np.pi * tau)                           # Hz
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.loglog(log["f"], log["S"][can_col], color="gray", alpha=0.25, linewidth=0.8, label=f"{can_col} data (raw)", zorder=1)
-    ax.loglog(f, S_Tcan(f, sigma, f_c), color="forestgreen", linewidth=2, label=fr"can, simulation ($f_c$ = {f_c:.2g} Hz)", zorder=3)
-    ax.loglog(f, S_Tcav(f, tau, sigma, f_c), color="magenta", linewidth=2, label="cavity, simulation", zorder=2)
-    ax.loglog(fb, Sb, color="forestgreen", linestyle="--", linewidth=2, label="can, measured", zorder=3)
-    ax.loglog(fb, Sb * cavity_filter(2.0 * np.pi * fb, tau), color="magenta", linestyle="--", linewidth=2, label="cavity, estimate", zorder=2)
-    ax.axvline(f_corner, color="magenta", linestyle=":", linewidth=1.5, alpha=0.4, label=fr"simulated $1/(2\pi\tau)$ = {f_corner:.2g} Hz", zorder=2)
+    # ax.loglog(log["f"], log["S"][can_col], color="gray", alpha=0.25, linewidth=0.8, label=f"{can_col} data (raw)", zorder=1)
+    ax.loglog(f, S_Tcan(f, sigma, f_c), color="forestgreen", alpha=0.4, linewidth=2, label=fr"can, simulation ($f_c$ = {f_c:.2g} Hz)", zorder=3)
+    ax.loglog(f, S_Tcav(f, tau, sigma, f_c), color="goldenrod", alpha=0.4, linewidth=2, label="cavity, simulation", zorder=2)
+    for col, tag, color in ((can_col, "in-loop", COLORS[0]), (outloop_col, "out-of-loop", COLORS[1])):
+        if col is None or (col == outloop_col and col == can_col and tag == "out-of-loop"):
+            continue
+        fb, Sb = log["Sb"][col]                                    # Hz, K^2/Hz, already extrapolated (if requested)
+        ax.loglog(fb, Sb, color=color, linewidth=2, label=f"can, measured ({tag})", zorder=3)
+        ax.loglog(fb, Sb * cavity_filter(2.0 * np.pi * fb, tau), color=color, linestyle="--", linewidth=2,
+                  label=f"cavity, estimate ({tag})", zorder=2)   # transfer function applied after extrapolation
+    # ax.axvline(f_corner, color="magenta", linestyle=":", linewidth=1.5, alpha=0.4, label=fr"simulated $1/(2\pi\tau)$ = {f_corner:.2g} Hz", zorder=2)
+    _mark_extpol(ax, log)
     ax.set_xlabel(r"frequency $f$ (Hz)")
     ax.set_ylabel(r"$S_T(f)$ (K$^2$/Hz)")
     ax.set_title("temperature noise: simulation vs data")
-    ax.legend(fontsize=7)
+    ax.legend(fontsize=7, handlelength=4)                          # long handles so -- vs -. are distinguishable
     fig.tight_layout(); fig.show()
     return fig, ax
 
 
-def plot_freq_noise(tau, r0, T0=300, sigma=1e-3, f_c=0.1, f=np.logspace(-4, 4, 400)):
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.loglog(f, S_nu_env(S_Tcav(f, tau, sigma, f_c)), color="magenta", linewidth=2, label="environmental thermal noise")
-    ax.loglog(f, S_nu_intrinsic(f, T0, r0), color="deepskyblue", linewidth=2, label="intrinsic thermorefractive noise")
-    ax.axhline(1.0, color="black", linestyle="--", linewidth=1.5, label=r"1 Hz$^2$/Hz")
-    ax.axvline(100.0, color="gray", linestyle=":", linewidth=1.5, label="100 Hz")
-    ax.set_xlabel(r"frequency $f$ (Hz)")
-    ax.set_ylabel(r"$S_\nu(f)$ (Hz$^2$/Hz)")
-    ax.set_title(f"cavity frequency noise at {T0:g} K")
-    ax.legend(fontsize=7)
-    fig.tight_layout(); fig.show()
-    return fig, ax
 
 
 

@@ -45,13 +45,18 @@ def log_bin(x, S, n_per_dec=10):
     Sb = np.array([np.mean(S[idx == i]) for i in bins])                   # mean PSD in bin
     return xb, Sb
 
+def lowpass_fft(y, dt, f_cut):
+    Y = np.fft.rfft(y)                                             # measured spectrum (amplitude + phase)
+    Y[np.fft.rfftfreq(y.size, dt) > f_cut] = 0.0                   # brick-wall: remove f > f_cut, keep DC (mean)
+    return np.fft.irfft(Y, y.size)                                 # channel units
 
 def extrapolate_psd(fb, Sb, f0, fit_dec=1.0, f_to=1e4, n_per_dec=10):
     win = (fb >= f0 / 10 ** fit_dec) & (fb < f0)                   # fit window: fit_dec decades just below f0
-    if np.count_nonzero(win) < 2:
-        raise ValueError(f"need >= 2 binned points in [{f0 / 10 ** fit_dec:.3g}, {f0:.3g}) Hz to extrapolate; widen extpol_fit_dec or lower extpol_from_Hz")
+    
     p = np.polyfit(np.log10(fb[win]), np.log10(Sb[win]), 1)        # log10 S = p[0]*log10 f + p[1]  (power law S = A f^alpha)
+    
     f_ext = 10 ** np.arange(np.log10(f0), np.log10(f_to) + 0.5 / n_per_dec, 1.0 / n_per_dec)   # Hz, log grid f0 -> f_to
+    
     keep = fb < f0                                                 # measured bins kept below f0
     f_out = np.concatenate([fb[keep], f_ext])                      # Hz
     S_out = np.concatenate([Sb[keep], 10 ** np.polyval(p, np.log10(f_ext))])   # units^2/Hz
@@ -60,7 +65,7 @@ def extrapolate_psd(fb, Sb, f0, fit_dec=1.0, f_to=1e4, n_per_dec=10):
 
 # ------------------------------------------------------------------ PTC10 log
 def load_ptc10(path, dt=None, cols=PTC10_COLS, n_skip=0, n_per_dec=10, rename=None,
-               extpol_from_Hz=None, extpol_fit_dec=1.0, extpol_to_Hz=1e4, **read_kw):
+               lowpass_Hz=None, lowpass_amb_Hz=None, extpol_fit_dec=1.0, extpol_to_Hz=1e4, **read_kw):
     df = pd.read_csv(path, sep=None, engine="python", **read_kw)   # read_kw: e.g. skiprows=, comment=
     units = {}
     heads = {}
@@ -93,18 +98,25 @@ def load_ptc10(path, dt=None, cols=PTC10_COLS, n_skip=0, n_per_dec=10, rename=No
     S = {c: psd_fft(y[c], fs)[1][keep] for c in cols}              # units^2/Hz
     Sb = {c: log_bin(f[keep], S[c], n_per_dec) for c in cols}      # (f_bin Hz, S_bin units^2/Hz)
     Sb_meas = Sb                                                   # binned measured PSD, never extrapolated
+    lowpass = {c: (lowpass_amb_Hz if c == "ambient" else lowpass_Hz) for c in cols}   # Hz per channel, None = no low-pass
+    y_lp = {c: y[c] if lowpass[c] is None else lowpass_fft(y[c], dt, lowpass[c]) for c in cols}   # channel units
+    lp_cols = [c for c in cols if lowpass[c] is not None]         # channels that get extrapolated
     extpol = None
-    if extpol_from_Hz is not None:
-        f0 = float(extpol_from_Hz)                                 # Hz
-        out = {c: extrapolate_psd(*Sb[c], f0, extpol_fit_dec, extpol_to_Hz, n_per_dec) for c in cols}
-        Sb = {c: (out[c][0], out[c][1]) for c in cols}             # measured below f0 + power law above f0
-        extpol = {"from_Hz": f0, "to_Hz": extpol_to_Hz, "fit_dec": extpol_fit_dec, "alpha": {c: out[c][2][0] for c in cols}}
-    return {"path": path, "dt": dt, "N": N, "t": n * dt, "y": y, "units": units, "f": f[keep], "S": S,
-            "Sb": Sb, "Sb_meas": Sb_meas, "extpol": extpol}
+    if lp_cols:
+        out = {c: extrapolate_psd(*Sb_meas[c], float(lowpass[c]), extpol_fit_dec, extpol_to_Hz, n_per_dec) for c in lp_cols}
+        Sb = {c: (out[c][0], out[c][1]) if c in out else Sb_meas[c] for c in cols}   # measured below cutoff + power law above
+        extpol = {"from_Hz": {c: float(lowpass[c]) for c in lp_cols}, "to_Hz": extpol_to_Hz, "fit_dec": extpol_fit_dec,
+                  "alpha": {c: out[c][2][0] for c in lp_cols}}
+    return {"path": path, "dt": dt, "N": N, "t": n * dt, "y": y, "y_lp": y_lp, "units": units, "f": f[keep], "S": S,
+            "Sb": Sb, "Sb_meas": Sb_meas, "extpol": extpol, "lowpass": lowpass}
+
 
 
 def psd_ratio(log, num, den):
-    return log["Sb"][num][0], log["Sb"][num][1] / log["Sb"][den][1]   # Hz, dimensionless
+    fn, Sn = log["Sb"][num]                                        # Hz, units^2/Hz
+    fd, Sd = log["Sb"][den]                                        # Hz, units^2/Hz (grid may differ if cutoffs differ)
+    Sd = 10 ** np.interp(np.log10(fn), np.log10(fd), np.log10(Sd), left=np.nan, right=np.nan)   # den on num grid; nan outside
+    return fn, Sn / Sd                                             # Hz, dimensionless
 
 
 # ------------------------------------------------------------------ Allan deviation
@@ -171,28 +183,52 @@ def S_nu_intrinsic(f, T0, r0, L_cavity=L_CAV, R=R_CAV, Cp=CP_VOL, kappa=KAPPA, b
 
 
 # ------------------------------------------------------------------ plots
-def _mark_extpol(ax, log):
+def _mark_extpol(ax, log, chans=None):
     ext = log.get("extpol")
-    if ext is not None:
-        ax.axvline(ext["from_Hz"], color="gray", linestyle="--", linewidth=1.0, alpha=0.6,
-                   label=fr"power-law extrapolation above {ext['from_Hz']:.3g} Hz")
+    if ext is None:
+        return
+    f0 = {c: v for c, v in ext["from_Hz"].items() if chans is None or c in chans}   # Hz per channel
+    for v in sorted(set(f0.values())):
+        who = ", ".join(c for c in f0 if f0[c] == v)
+        ax.axvline(v, color="gray", linestyle="--", linewidth=1.0, alpha=0.6,
+                   label=fr"power-law extrapolation above {v:.3g} Hz ({who})")
 
 def plot_psd(log, chans=("thermistor", "outloop", "ambient"), ref="ambient", colors=CH_COLORS):
     fig, ax = plt.subplots(figsize=(9, 4))
     ax_ratio = ax.twinx()
+    blank = lambda: plt.Line2D([], [], linestyle="none")           # invisible legend handle (titles / padding)
+    cols = []                                                      # one legend column per channel: [(handle, label), ...]
     for c in chans:
         fb, Sb = log["Sb"][c]                                      # Hz, K^2/Hz
+        fm, Sm = log["Sb_meas"][c]                                 # Hz, K^2/Hz, original binned data
         ax.loglog(log["f"], log["S"][c], color=colors[c], alpha=0.15, linewidth=0.5)
-        ax.loglog(fb, Sb, color=colors[c], linewidth=1.5, label=f"{c}")
+        f_cut = log.get("lowpass", {}).get(c)                      # Hz or None
+        col = [(blank(), c)]                                       # column title
+        if f_cut is None:
+            col.append((ax.loglog(fm, Sm, color=colors[c], linewidth=1.5)[0], "raw data"))
+        else:
+            lo = fm <= f_cut                                       # below the cutoff: kept as measured
+            hi = fm >= fm[lo][-1] if np.any(lo) else np.ones_like(lo)   # above the cutoff: removed by the low pass (shares one point)
+            ext = fb >= f_cut                                      # power-law extrapolation
+            col.append((ax.loglog(fm[lo], Sm[lo], color=colors[c], linewidth=1.5)[0], "raw data"))
+            col.append((ax.loglog(fm[hi], Sm[hi], color=colors[c], linestyle=":", linewidth=1.5)[0], f"{f_cut:.3g} Hz low pass"))
+            col.append((ax.loglog(fb[ext], Sb[ext], color=colors[c], linestyle="-.", linewidth=1.5)[0], "extrapolation"))
+        cols.append(col)
         if ref is not None and c != ref:
             ax_ratio.loglog(*psd_ratio(log, c, ref), color=colors[c], linestyle="--", linewidth=1.5, label=fr"{c} / {ref} ($S_{{\mathrm{{{c}}}}}/S_{{\mathrm{{{ref}}}}}$)")
-    _mark_extpol(ax, log)
+    # _mark_extpol(ax, log, chans)
     ax.set_xlabel(r"frequency $f$ (Hz)")
     ax.set_ylabel("temperature noise PSD (K$^2$/Hz)")
     ax_ratio.set_ylabel("PSD ratio (dimensionless)")
-    handles = ax.get_legend_handles_labels()
-    handles_ratio = ax_ratio.get_legend_handles_labels()
-    ax.legend(handles[0] + handles_ratio[0], handles[1] + handles_ratio[1], loc="lower left", fontsize=8)
+    rows = max(len(col) for col in cols)
+    cols = [col + [(blank(), "")] * (rows - len(col)) for col in cols]   # pad so every column has the same height
+    entries = [e for col in cols for e in col]                     # column-major order (matplotlib fills legends by column)
+    leg = ax.legend([h for h, _ in entries], [l for _, l in entries], ncol=len(cols), loc="lower left", fontsize=8, handlelength=3)
+    for k, text in enumerate(leg.get_texts()):
+        if k % rows == 0:
+            text.set_fontweight("bold")                            # column titles
+    if ax_ratio.get_legend_handles_labels()[0]:
+        ax_ratio.legend(loc="upper right", fontsize=8)             # ratios in their own legend
     fig.tight_layout(); fig.show()
     return fig, ax
 
@@ -249,6 +285,76 @@ def plot_can_cavity(log, tau, can_col="thermistor", outloop_col="outloop", sigma
     return fig, ax
 
 
+def plot_freq_noise(log, tau, can_col="thermistor", outloop_col="outloop"):
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for col, tag, color in ((can_col, "in-loop", COLORS[0]), (outloop_col, "out-of-loop", COLORS[1])):
+        if col is None or (col == outloop_col and col == can_col and tag == "out-of-loop"):
+            continue
+        fb, Sb = log["Sb"][col]                                    # Hz, K^2/Hz, already extrapolated (if requested)
+        ax.loglog(fb, S_nu_env(Sb), color=color, linewidth=2, label=f"can, measured ({tag})")   # Hz^2/Hz
+        ax.loglog(fb, S_nu_env(Sb * cavity_filter(2.0 * np.pi * fb, tau)), color=color, linestyle="--", linewidth=2,
+                  label=f"cavity, estimate ({tag})")               # Hz^2/Hz, transfer function then thermorefractive conversion
+    ax.axhline(1.0, color="black", linestyle="--", linewidth=1.5, label=r"1 Hz$^2$/Hz")
+    ax.axvline(100.0, color="gray", linestyle=":", linewidth=1.5, label="100 Hz")
+    ax.set_xlabel(r"frequency $f$ (Hz)")
+    ax.set_ylabel(r"$S_\nu(f)$ (Hz$^2$/Hz)")
+    ax.set_title(r"frequency noise from temperature noise")
+    ax.legend(fontsize=7, handlelength=4)
+    fig.tight_layout(); fig.show()
+    return fig, ax
+
+
+# ------------------------------------------------------------------ time domain
+def synth_ifft(log, col, fs=None, T=None, n_max=2**21, seed=0):
+    ext = log["extpol"]
+    extrapolated = ext is not None and col in ext["from_Hz"]       # this channel has a power-law tail
+    f_top = ext["to_Hz"] if extrapolated else 0.5 / log["dt"]      # Hz, top of available PSD
+    if T is None:
+        T = log["N"] * log["dt"]                                   # s, measured record length
+    if fs is None:
+        fs = min(2.0 * f_top, n_max / T)                           # Hz, Nyquist = top of PSD, lowered so all of T fits in n_max                       # s, measured record length
+    n = int(min(round(T * fs), n_max))                             # number of synthesized samples (capped)
+    n -= n % 2                                                     # even length -> real Nyquist bin
+    fb, Sb = log["Sb"][col]                                        # Hz, units^2/Hz (measured + extrapolated)
+    f = np.fft.rfftfreq(n, 1.0 / fs)                               # Hz, uniform grid
+    S = np.zeros_like(f)                                           # units^2/Hz, DC left at 0 (zero mean)
+    S[1:] = 10 ** np.interp(np.log10(f[1:]), np.log10(fb), np.log10(Sb))   # log-log interpolation, held flat outside fb
+    rng = np.random.default_rng(seed)
+    X = np.sqrt(S * fs * n / 4.0) * (rng.standard_normal(f.size) + 1j * rng.standard_normal(f.size))   # Timmer & Koenig (1995): E|X|^2 = S fs n / 2
+    X[-1] = X[-1].real                                             # Nyquist bin must be real
+    return np.arange(n) / fs, np.fft.irfft(X, n)                   # s, units (zero-mean fluctuation)
+
+
+def plot_ifft(log, chans=("thermistor", "outloop"), fs=None, T=None, n_max=2**21, seed=0, colors=CH_COLORS):
+    fig, axes = plt.subplots(len(chans), 1, figsize=(9, 2.2 * len(chans) + 1), sharex=True, squeeze=False)
+    for k, (ax, c) in enumerate(zip(axes[:, 0], chans)):
+        t, x = synth_ifft(log, c, fs, T, n_max, seed + k)          # s, units; own seed per channel (independent phases)
+        ax.plot(t / 3600.0, x, color=colors[c], linewidth=0.5, label=c)   # h
+        ax.set_ylabel(fr"$\delta T$ ({log['units'].get(c, 'K')})")
+        ax.ticklabel_format(axis="y", style="plain", useOffset=False)   # full numbers, no 1e-5 multiplier
+        ax.legend(loc="upper right", fontsize=8)
+    ext = log["extpol"]
+    f0 = {c: ext["from_Hz"][c] for c in chans if ext is not None and c in ext["from_Hz"]}   # Hz per channel
+    src = "PSD (extrapolated)" if f0 else "PSD (no extrapolation)"
+    axes[0, 0].set_title(fr"IFFT of {src}, $T$ = {(t[-1] + t[1]) / 3600.0:.3g} h")
+    axes[-1, 0].set_xlabel(r"time $t$ (h)")
+    fig.tight_layout(); fig.show()
+    return fig, axes
+
+
+def plot_time(log, groups=(("thermistor", "outloop"), ("ambient",)), colors=CH_COLORS):
+    fig, axes = plt.subplots(len(groups), 1, figsize=(9, 2.5 * len(groups) + 1), sharex=True, squeeze=False)
+    for ax, grp in zip(axes[:, 0], groups):
+        for c in grp:
+            f_cut = log.get("lowpass", {}).get(c)                  # Hz or None
+            ax.plot(log["t"], log["y_lp"][c], color=colors[c], linewidth=0.5,
+                    label=c if f_cut is None else f"{c} (low-pass {f_cut:.3g} Hz)")   # s, channel units
+        ax.set_ylabel(f"$T$ ({log['units'].get(grp[0], 'K')})")
+        ax.legend(loc="upper right", fontsize=8)
+    axes[0, 0].set_title(f"measured time series ({log['path']})")
+    axes[-1, 0].set_xlabel(r"time $t$ (s)")
+    fig.tight_layout(); fig.show()
+    return fig, axes
 
 
 
